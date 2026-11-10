@@ -38,19 +38,22 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Logger subset used by the gate; the console satisfies it as well. */
+/** Logger subset used by the gate; lines are written to stderr. */
 export interface LogSink {
   info(message: string): void
   warn(message: string): void
 }
 
 /**
- * Use the cordis logger on a real harness and fall back to the console when the
- * plugin is driven directly from tests.
+ * Report startup lines on stderr, which is the only channel a headless web
+ * profile leaves visible: the harness routes ctx.logger to its own exporters,
+ * and the web profile installs none of them, so a generated password or a
+ * listen address logged there would never reach the operator.
  */
 export function resolveLogger(ctx: Context): LogSink {
-  const logger = (ctx as { logger?: Partial<LogSink> }).logger
-  return typeof logger?.info === 'function' && typeof logger?.warn === 'function'
-    ? (logger as LogSink)
-    : console
+  void ctx
+  const write = (message: string): void => {
+    process.stderr.write('[dsh-frontgate] ' + message + '\n')
+  }
+  return { info: write, warn: write }
 }
