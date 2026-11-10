@@ -137,4 +137,4 @@ npm pack          # prepack rebuilds and reruns the tests
 
 ## License
 
-Apache-2.0 © 2026 Lornatang
+Apache-2.0
