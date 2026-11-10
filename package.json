@@ -1,7 +1,7 @@
 {
   "name": "dsh-frontgate",
-  "version": "1.0.0",
-  "description": "Small, hardened password gate and reverse proxy for the DeepSeek Harness Web UI: async scrypt login, revocable stateless sessions, Host/Origin rewrite, server-side launch-token exchange, WebSocket pass-through and a secure-context polyfill.",
+  "version": "1.1.0",
+  "description": "Password gate and reverse proxy for the DeepSeek Harness Web UI: scrypt login, signed session cookie, Host/Origin rewrite, launch-token exchange, WebSocket pass-through.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

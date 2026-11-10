@@ -193,7 +193,7 @@ test('unauthenticated api calls get 401 json', async (t) => {
   assert.deepEqual(JSON.parse(body), { error: 'unauthorized', login: '/__gate/login' })
 })
 
-test('login page is hardened', async (t) => {
+test('login page sends restrictive headers', async (t) => {
   const { gate } = await withGate(t)
   const { res, body } = await request(gate.port, '/__gate/login')
   assert.equal(res.status, 200)
@@ -201,7 +201,9 @@ test('login page is hardened', async (t) => {
   assert.match(res.headers.get('content-security-policy'), /form-action 'self'/)
   assert.equal(res.headers.get('cache-control'), 'no-store')
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
+  assert.match(body, /<html lang="en">/)
   assert.match(body, /<form method="post"/)
+  assert.match(body, /Sign in/)
   assert.ok(!body.includes('<script'))
 })
 
@@ -210,7 +212,7 @@ test('wrong password is rejected without a session', async (t) => {
   const { res, cookies, body } = await login(gate.port, 'wrong-password')
   assert.equal(res.status, 401)
   assert.equal(cookies.length, 0)
-  assert.match(body, /密码错误/)
+  assert.match(body, /Wrong password\./)
 })
 
 test('cross-site login requests are rejected', async (t) => {
@@ -220,7 +222,7 @@ test('cross-site login requests are rejected', async (t) => {
   assert.equal(cookies.length, 0)
 })
 
-test('correct password issues a hardened cookie', async (t) => {
+test('correct password issues a session cookie', async (t) => {
   const { gate } = await withGate(t)
   const { res, cookies } = await login(gate.port)
   assert.equal(res.status, 303)
@@ -372,6 +374,15 @@ test('changing the password revokes old sessions', async (t) => {
   const fresh = await login(second.port, 'a-brand-new-password')
   assert.equal(fresh.res.status, 303)
   assert.ok(fresh.cookie)
+})
+
+test('password can come from the environment', async (t) => {
+  process.env.DSH_FRONTGATE_PASSWORD = 'env-provided-password'
+  t.after(() => { delete process.env.DSH_FRONTGATE_PASSWORD })
+  const { gate } = await withGate(t, { passwordHash: '' })
+  const { res, cookie } = await login(gate.port, 'env-provided-password')
+  assert.equal(res.status, 303)
+  assert.ok(cookie)
 })
 
 test('unknown gate routes are not proxied', async (t) => {
