@@ -17,11 +17,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
 import { COOKIE, HASH_RE, hashPassword, passwordVersion, randomPassword, verifyToken } from './auth.ts'
 import { resolveLogger } from './context.ts'
-import { clientIp, cookieValue, intOr, isLoopbackHost, text } from './http.ts'
+import { clientIp, cookieValue, intOr, isLoopbackHost, originMatchesHost, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
-import { hashFor, readState, statePathFor, writeState } from './state.ts'
+import { hashFor, readState, statePathFor, tightenState, writeState } from './state.ts'
 
 /** Cordis metadata: the plugin id shown in logs and the services it waits for. */
 export const name = 'dsh-frontgate'
@@ -55,6 +55,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
   // Per-profile state: password hash + cookie signing secret, 0600.
   const statePath = statePathFor(ctx.profileContext?.patchPath)
   const state = readState(statePath)
+  tightenState(statePath)
 
   // Password precedence: config hash, config password, env hash, env password,
   // state file, then a generated password shown once.
@@ -140,6 +141,11 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     try {
       if (!sessionOf(req)) {
         socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        return
+      }
+      if (!originMatchesHost(req)) {
+        logger.warn('websocket blocked: cross-origin upgrade from ' + String(req.headers.origin || ''))
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
         return
       }
       proxy.harnessCookie()

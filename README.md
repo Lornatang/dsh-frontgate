@@ -78,7 +78,7 @@ Append to the profile's `cordis.patch.yml`:
 | `title` | `'DeepSeek Harness'` | Login page title. |
 | `password` | `''` | Plain-text password, hashed at startup and not written to disk. |
 | `passwordHash` | `''` | `scrypt$...` hash. Takes precedence over `password`. |
-| `maxAttempts` / `lockMinutes` | `5` / `5` | Failures per client before lockout, and lockout length. |
+| `maxAttempts` / `lockMinutes` | `5` / `5` | Failed logins per client before answers become 429, and the window. |
 | `tlsCertFile` / `tlsKeyFile` | `''` | Set both to serve HTTPS. |
 | `trustProxy` | `false` | Trust `X-Forwarded-*` from your reverse proxy. |
 
@@ -93,7 +93,8 @@ issued session.
 
 - In a container set `listenHost` to `'0.0.0.0'` and `listenPort` to the port
   mapped from the host. Map only that port, not the harness port.
-- Plain HTTP is for a LAN or VPN. For public access enable
+- Plain HTTP exposes the password and the session cookie to anyone on the path.
+  Use it only on a trusted LAN or VPN. For anything else enable
   `tlsCertFile`/`tlsKeyFile`, or terminate TLS in Caddy or Nginx and set
   `trustProxy: true`.
 - If `dsh` listens on a non-loopback address the log warns that the gate can
@@ -101,8 +102,16 @@ issued session.
 
 ## Security notes
 
-- Sessions are HMAC-signed with a key derived from the password hash.
-- Secret comparisons are constant-time; only a scrypt hash is stored.
+- Session cookies are HMAC-SHA256 signed with a random 32-byte secret kept in
+  the state file; the secret is not derived from the password hash.
+- Requests whose `Origin` names another site are refused with 403 before they
+  reach the harness; WebSocket handshakes get the same check.
+- Repeated failures from one client answer 429 with `Retry-After`, but a
+  correct password is still verified and accepted. One client therefore cannot
+  lock out every user behind a shared address. Guessing throughput is bounded
+  by the scrypt cost and the scrypt concurrency cap.
+- Secret comparisons are constant-time; the state file holds the scrypt hash and
+  the signing secret, never the password, and is chmod 0600 on startup.
 - The login page has no scripts and sends CSP, `no-store`, `no-referrer` and
   `X-Frame-Options`.
 - The proxy target is fixed to the local harness and never taken from user
@@ -130,7 +139,7 @@ The plugin follows the layout of the packages shipped with the harness:
 ```bash
 npm ci            # install the pinned dev dependencies (package-lock.json)
 npm run typecheck # tsc --noEmit over src/
-npm test          # build, then node --test tests/*.test.mjs (19 tests)
+npm test          # build, then node --test tests/*.test.mjs (23 tests)
 npm run build     # regenerate lib/index.js and lib/types/
 npm pack          # prepack rebuilds and reruns the tests
 ```

@@ -6,6 +6,8 @@ export interface State {
 }
 /** Read state, treating a missing or malformed file as empty. */
 export declare function readState(path: string): State;
+/** Best effort chmod; a missing file or a read-only filesystem is ignored. */
+export declare function tightenState(path: string): void;
 /** Write state atomically enough for one process, owner-readable only. */
 export declare function writeState(path: string, value: State): void;
 /** Resolve the state path for the profile the plugin was loaded from. */

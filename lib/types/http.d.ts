@@ -17,7 +17,14 @@ export declare function cookieValue(header: string | string[] | undefined, name:
 export declare function clientIp(req: IncomingMessage, trustProxy: boolean): string;
 /** Hostname without the port, IPv6 brackets preserved. */
 export declare function hostnameOf(value: unknown): string;
-/** Same-host login check: CSRF needs a cross-site Origin or a foreign Fetch-Site. */
+/**
+ * True when the Origin header, if present, names the same authority as Host.
+ *
+ * The port is compared when the Host header carries one; a Host without a port
+ * stays accepted so a TLS-terminating proxy that strips the port keeps working.
+ */
+export declare function originMatchesHost(req: IncomingMessage): boolean;
+/** Login check: Origin and Fetch-Site must both look same-origin. */
 export declare function sameOrigin(req: IncomingMessage): boolean;
 /** Only same-site absolute paths; rejects //evil and backslash tricks. */
 export declare function safeNext(value: unknown): string;

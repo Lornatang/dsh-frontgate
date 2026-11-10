@@ -10,7 +10,8 @@ import {
   COOKIE, clearCookie, passwordVersion, sessionCookie, signToken, verifyPassword, verifyToken,
 } from './auth.ts'
 import {
-  MAX_FORM, clientIp, cookieValue, html, json, readForm, redirect, safeNext, sameOrigin, text,
+  MAX_FORM, clientIp, cookieValue, html, json, originMatchesHost, readForm, redirect, safeNext,
+  sameOrigin, text,
 } from './http.ts'
 import { loginPage } from './page.ts'
 import type { LogSink } from './context.ts'
@@ -92,8 +93,6 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
       const declared = Number(req.headers['content-length'] || 0)
       if (declared > MAX_FORM) return text(res, 413, 'request body too large\n')
       const ip = clientIp(req, trustProxy)
-      const wait = lockRemaining(ip)
-      if (wait > 0) return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
       let form: string
       try {
         form = await readForm(req)
@@ -110,8 +109,16 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
         checksInFlight -= 1
       }
       if (!ok) {
+        // A correct password is always verified and accepted. The lockout only
+        // changes the response for failures, so a shared address (Docker NAT)
+        // cannot be locked out by one client.
+        const locked = lockRemaining(ip) > 0
         recordFailure(ip)
         log.info('login failed from ' + ip)
+        if (locked) {
+          const wait = lockRemaining(ip)
+          return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
+        }
         return html(res, 401, loginPage(title, next, 'Wrong password.'))
       }
       failures.delete(ip)
@@ -147,6 +154,12 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
         return json(res, 401, { error: 'unauthorized', login: '/__gate/login' })
       }
       return redirect(res, '/__gate/login?next=' + encodeURIComponent(raw))
+    }
+
+    if (!originMatchesHost(req)) {
+      log.warn('cross-origin request blocked: ' + String(req.method) + ' ' + path)
+      if (path === '/api' || path.startsWith('/api/')) return json(res, 403, { error: 'forbidden' })
+      return text(res, 403, 'forbidden\n')
     }
 
     let cookie: string

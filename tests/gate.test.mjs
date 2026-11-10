@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, hashPassword, injectPolyfill } from '../lib/index.js'
@@ -141,7 +141,7 @@ async function login(port, password = PASSWORD, next = '/', extraHeaders = {}) {
   return { res, body, cookies, cookie: cookies.length ? cookies[0].split(';')[0] : '' }
 }
 
-function openWebSocket(port, cookie) {
+function openWebSocket(port, cookie, origin) {
   return new Promise((resolve) => {
     const socket = net.connect(port, '127.0.0.1')
     let buffer = ''
@@ -161,11 +161,12 @@ function openWebSocket(port, cookie) {
         'Sec-WebSocket-Version: 13',
       ]
       if (cookie) head.push('Cookie: ' + cookie)
+      if (origin) head.push('Origin: ' + origin)
       socket.write(head.join('\r\n') + '\r\n\r\n')
     })
     socket.on('data', (chunk) => {
       buffer += chunk.toString('latin1')
-      if (buffer.includes('HTTP/1.1 101') || buffer.includes('HTTP/1.1 401') || buffer.includes('HTTP/1.1 503')) finish()
+      if (/HTTP\/1\.1 (101|401|403|503)/.test(buffer)) finish()
     })
     socket.on('error', finish)
     setTimeout(finish, 2000)
@@ -294,14 +295,16 @@ test('login next targets stay on site', async (t) => {
   }
 })
 
-test('repeated failures lock the client out', async (t) => {
+test('repeated failures answer 429 but a correct password still signs in', async (t) => {
   const { gate } = await withGate(t, { maxAttempts: 2, lockMinutes: 1 })
   assert.equal((await login(gate.port, 'nope')).res.status, 401)
   assert.equal((await login(gate.port, 'nope')).res.status, 401)
   const locked = await login(gate.port, 'nope')
   assert.equal(locked.res.status, 429)
   assert.ok(locked.res.headers.get('retry-after'))
-  assert.equal((await login(gate.port, PASSWORD)).res.status, 429)
+  // Correct passwords are verified even while the client is throttled, so a
+  // shared address (Docker NAT) cannot be locked out by one client.
+  assert.equal((await login(gate.port, PASSWORD)).res.status, 303)
 })
 
 test('oversized login bodies are refused', async (t) => {
@@ -383,6 +386,62 @@ test('password can come from the environment', async (t) => {
   const { res, cookie } = await login(gate.port, 'env-provided-password')
   assert.equal(res.status, 303)
   assert.ok(cookie)
+})
+
+test('cross-origin login origins with a foreign port are rejected', async (t) => {
+  const { gate } = await withGate(t)
+  const { res, cookies } = await login(gate.port, PASSWORD, '/', { origin: 'http://127.0.0.1:1' })
+  assert.equal(res.status, 403)
+  assert.equal(cookies.length, 0)
+})
+
+test('cross-origin proxy requests are refused', async (t) => {
+  const { gate, upstream } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  assert.ok(cookie)
+  const cross = await request(gate.port, '/api/sessions', {
+    method: 'POST',
+    headers: { cookie, origin: 'http://evil.example', 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(cross.res.status, 403)
+  assert.deepEqual(JSON.parse(cross.body), { error: 'forbidden' })
+  assert.equal(upstream.seen.filter((entry) => entry.method === 'POST').length, 0)
+  const same = await request(gate.port, '/api/sessions', {
+    method: 'POST',
+    headers: { cookie, origin: 'http://127.0.0.1:' + gate.port, 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(same.res.status, 200)
+})
+
+test('cross-origin websocket upgrades are refused', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  assert.ok(cookie)
+  const cross = await openWebSocket(gate.port, cookie, 'http://evil.example')
+  assert.match(cross.text(), /HTTP\/1\.1 403/)
+  cross.socket.destroy()
+  const same = await openWebSocket(gate.port, cookie, 'http://127.0.0.1:' + gate.port)
+  assert.match(same.text(), /HTTP\/1\.1 101/)
+  same.socket.destroy()
+})
+
+test('state file permissions are tightened on startup', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const statePath = join(dataDir, 'dsh-frontgate.json')
+  writeFileSync(statePath, JSON.stringify({ passwordHash: HASH, secret: 'a'.repeat(64) }) + '\n')
+  chmodSync(statePath, 0o644)
+  const upstream = await startUpstream()
+  const gate = await startGate(upstream.port, dir)
+  t.after(async () => {
+    gate.dispose()
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  assert.equal(statSync(statePath).mode & 0o777, 0o600)
 })
 
 test('unknown gate routes are not proxied', async (t) => {

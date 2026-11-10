@@ -46,17 +46,44 @@ export function hostnameOf(value: unknown): string {
   return host.split(':')[0] ?? host
 }
 
-/** Same-host login check: CSRF needs a cross-site Origin or a foreign Fetch-Site. */
-export function sameOrigin(req: IncomingMessage): boolean {
-  const site = req.headers['sec-fetch-site']
-  if (site !== undefined && site !== 'same-origin' && site !== 'none') return false
+/** Port carried by a host[:port] authority, or '' when it has none. */
+function explicitPort(authority: string): string {
+  if (authority.startsWith('[')) {
+    const end = authority.indexOf(']')
+    if (end === -1) return ''
+    const rest = authority.slice(end + 1)
+    return rest.startsWith(':') ? rest.slice(1) : ''
+  }
+  const at = authority.lastIndexOf(':')
+  return at === -1 ? '' : authority.slice(at + 1)
+}
+
+/**
+ * True when the Origin header, if present, names the same authority as Host.
+ *
+ * The port is compared when the Host header carries one; a Host without a port
+ * stays accepted so a TLS-terminating proxy that strips the port keeps working.
+ */
+export function originMatchesHost(req: IncomingMessage): boolean {
   const origin = req.headers.origin
   if (origin === undefined) return true
   try {
-    return new URL(origin).hostname.toLowerCase() === hostnameOf(req.headers.host)
+    const url = new URL(origin)
+    const host = String(req.headers.host || '').trim().toLowerCase()
+    if (url.hostname.toLowerCase() !== hostnameOf(host)) return false
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+    const declared = explicitPort(host)
+    return declared === '' || declared === port
   } catch {
     return false
   }
+}
+
+/** Login check: Origin and Fetch-Site must both look same-origin. */
+export function sameOrigin(req: IncomingMessage): boolean {
+  const site = req.headers['sec-fetch-site']
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') return false
+  return originMatchesHost(req)
 }
 
 /** Only same-site absolute paths; rejects //evil and backslash tricks. */
