@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0 - 2026-11-10
+
+- Sources are now TypeScript modules under `src/`, one per concern. They are
+  bundled into `lib/index.js` by esbuild and shipped with generated type
+  declarations, matching the layout of the packages bundled with the harness.
+- Options are declared as a schemastery schema, so the harness validates them
+  and applies defaults before the plugin starts.
+- Tests moved to `tests/` and run against the built bundle.
+- License changed to Apache-2.0.
+
 ## 1.1.0 - 2026-11-10
 
 - Added `install.sh`, a one-command installer. It creates the profile from the

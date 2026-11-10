@@ -38,14 +38,14 @@ curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/instal
 Or install manually:
 
 ```bash
-dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v1.1.0
+dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v1.2.0
 ```
 
 Offline: on a machine with network access unpack a checkout and run
 `npm pack`, copy the tarball over, then:
 
 ```bash
-dsh plugin --profile <name> add ./dsh-frontgate-1.1.0.tgz
+dsh plugin --profile <name> add ./dsh-frontgate-1.2.0.tgz
 ```
 
 Restart the profile after installing.
@@ -113,13 +113,28 @@ Known limits: one password for everyone, no multi-user accounts, no way to
 revoke a single session, and no admin page. Configuration changes need a patch
 edit and a restart.
 
+## Project layout
+
+The plugin follows the layout of the packages shipped with the harness:
+
+| Path | Purpose |
+| --- | --- |
+| `src/` | TypeScript sources. Each module owns one concern: config, auth, proxy, gate handler, login page. |
+| `lib/` | Build output: the bundled `index.js` and the generated `.d.ts` files. |
+| `tests/` | End-to-end tests that run against the built bundle. |
+| `scripts/build.mjs` | esbuild bundle plus `tsc` declaration emit. |
+| `cordis.patch.yml` | Bundle patch that inserts the plugin into a profile. |
+
 ## Development
 
 ```bash
-npm test    # node --test test/e2e.mjs, 19 tests
-npm pack    # prepack runs the tests
+npm install       # dev dependencies: cordis types, esbuild, typescript
+npm run typecheck # tsc --noEmit over src/
+npm test          # build, then node --test tests/*.test.mjs (19 tests)
+npm run build     # regenerate lib/index.js and lib/types/
+npm pack          # prepack rebuilds and reruns the tests
 ```
 
 ## License
 
-MIT © 2026 Lornatang
+Apache-2.0 © 2026 Lornatang

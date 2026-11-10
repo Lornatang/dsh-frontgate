@@ -2,7 +2,7 @@
 # Install dsh-frontgate into a DeepSeek Harness profile.
 set -euo pipefail
 
-VERSION="v1.1.0"
+VERSION="v1.2.0"
 REPO="Lornatang/dsh-frontgate"
 PROFILE="${DSH_FRONTGATE_PROFILE:-web}"
 

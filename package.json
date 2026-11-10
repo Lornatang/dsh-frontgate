@@ -1,15 +1,20 @@
 {
   "name": "dsh-frontgate",
-  "version": "1.1.0",
-  "description": "Password gate and reverse proxy for the DeepSeek Harness Web UI: scrypt login, signed session cookie, Host/Origin rewrite, launch-token exchange, WebSocket pass-through.",
+  "version": "1.2.0",
+  "description": "Password gate and reverse proxy for the DeepSeek Harness Web UI: scrypt login, signed session cookie, Host and Origin rewrite, launch-token exchange, WebSocket pass-through.",
   "type": "module",
   "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
   "exports": {
-    ".": "./lib/index.js",
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/index.js",
+    "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
     "CHANGELOG.md",
@@ -25,9 +30,23 @@
     "dsh": ">=0.2.2-rc.1"
   },
   "scripts": {
-    "test": "node --test test/e2e.mjs",
-    "prepack": "node --test test/e2e.mjs",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run build && node --test tests/*.test.mjs",
     "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@types/node": "^22.18.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
   },
   "keywords": [
     "dsh",
@@ -41,7 +60,7 @@
     "websocket",
     "self-hosted"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Lornatang",
   "repository": {
     "type": "git",

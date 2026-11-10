@@ -1,0 +1,161 @@
+/**
+ * The gate's HTTP surface: health, login, logout, and the authenticated proxy.
+ *
+ * Unauthenticated API calls get 401 JSON so the UI can react; every other path
+ * is redirected to the login page. Authenticated requests are handed to the
+ * proxy with an exchanged harness cookie.
+ */
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import {
+  COOKIE, clearCookie, passwordVersion, sessionCookie, signToken, verifyPassword, verifyToken,
+} from './auth.ts'
+import {
+  MAX_FORM, clientIp, cookieValue, html, json, readForm, redirect, safeNext, sameOrigin, text,
+} from './http.ts'
+import { loginPage } from './page.ts'
+import type { LogSink } from './context.ts'
+
+/** Largest number of clients remembered for lockout accounting. */
+const MAX_TRACKED_CLIENTS = 1024
+/** Login checks that may run scrypt at the same time. */
+const CHECK_CONCURRENCY = 2
+
+/** Values the gate needs at request time. */
+export interface GateRuntime {
+  title: string
+  passwordHash: string
+  secret: string
+  pv: string
+  sessionSeconds: number
+  maxAttempts: number
+  lockMs: number
+  trustProxy: boolean
+  useTls: boolean
+}
+
+/** Collaborators the handler delegates to. */
+export interface GateOptions {
+  runtime: GateRuntime
+  harnessCookie(): Promise<string>
+  forward(req: IncomingMessage, res: ServerResponse, cookie: string): void
+  log: LogSink
+}
+
+interface Failure {
+  count: number
+  until: number
+}
+
+/** Build the request handler for one gate instance. */
+export function createHandler(options: GateOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const { runtime, harnessCookie, forward, log } = options
+  const { title, passwordHash, secret, pv, sessionSeconds, maxAttempts, lockMs, trustProxy, useTls } = runtime
+
+  // Login throttling: per-client lockout plus a global scrypt slot limit.
+  const failures = new Map<string, Failure>()
+  let checksInFlight = 0
+
+  function lockRemaining(ip: string): number {
+    const entry = failures.get(ip)
+    if (!entry || !entry.until) return 0
+    if (entry.until > Date.now()) return entry.until - Date.now()
+    failures.delete(ip)
+    return 0
+  }
+
+  function recordFailure(ip: string): void {
+    let entry = failures.get(ip)
+    if (!entry) {
+      if (failures.size >= MAX_TRACKED_CLIENTS) {
+        const oldest = failures.keys().next().value
+        if (oldest !== undefined) failures.delete(oldest)
+      }
+      entry = { count: 0, until: 0 }
+      failures.set(ip, entry)
+    }
+    entry.count += 1
+    if (entry.count >= maxAttempts) {
+      entry.count = 0
+      entry.until = Date.now() + lockMs
+    }
+  }
+
+  function sessionOf(req: IncomingMessage): boolean {
+    const token = cookieValue(req.headers.cookie, COOKIE)
+    return Boolean(token) && verifyToken(secret, pv, token)
+  }
+
+  async function handleLogin(req: IncomingMessage, res: ServerResponse, search: string): Promise<void> {
+    const next = safeNext(new URLSearchParams(search).get('next') || '/')
+    if (req.method === 'POST') {
+      if (!sameOrigin(req)) return html(res, 403, loginPage(title, next, 'Origin check failed.'))
+      const declared = Number(req.headers['content-length'] || 0)
+      if (declared > MAX_FORM) return text(res, 413, 'request body too large\n')
+      const ip = clientIp(req, trustProxy)
+      const wait = lockRemaining(ip)
+      if (wait > 0) return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
+      let form: string
+      try {
+        form = await readForm(req)
+      } catch (err) {
+        if ((err as Error).message === 'too large') return text(res, 413, 'request body too large\n')
+        return text(res, 400, 'bad request\n')
+      }
+      if (checksInFlight >= CHECK_CONCURRENCY) return text(res, 429, 'busy, retry shortly\n', { 'retry-after': '1' })
+      checksInFlight += 1
+      let ok = false
+      try {
+        ok = await verifyPassword(new URLSearchParams(form).get('password') || '', passwordHash)
+      } finally {
+        checksInFlight -= 1
+      }
+      if (!ok) {
+        recordFailure(ip)
+        log.info('login failed from ' + ip)
+        return html(res, 401, loginPage(title, next, 'Wrong password.'))
+      }
+      failures.delete(ip)
+      log.info('login from ' + ip)
+      res.setHeader('set-cookie', sessionCookie(signToken(secret, pv, sessionSeconds), sessionSeconds, useTls))
+      return redirect(res, next, 303)
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return text(res, 405, 'method not allowed\n', { allow: 'GET, POST' })
+    }
+    if (sessionOf(req)) return redirect(res, '/')
+    return html(res, 200, loginPage(title, next, ''))
+  }
+
+  /** Route one request; never throws for expected paths. */
+  return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const raw = req.url || '/'
+    if (!raw.startsWith('/')) return text(res, 400, 'bad request\n')
+    const queryAt = raw.indexOf('?')
+    const path = queryAt === -1 ? raw : raw.slice(0, queryAt)
+    const search = queryAt === -1 ? '' : raw.slice(queryAt)
+
+    if (path === '/__gate/health') return json(res, 200, { ok: true, service: 'dsh-frontgate' })
+    if (path === '/__gate/login') return handleLogin(req, res, search)
+    if (path === '/__gate/logout') {
+      res.setHeader('set-cookie', clearCookie())
+      return redirect(res, '/__gate/login')
+    }
+    if (path.startsWith('/__gate/')) return text(res, 404, 'not found\n')
+
+    if (!sessionOf(req)) {
+      if (path === '/api' || path.startsWith('/api/')) {
+        return json(res, 401, { error: 'unauthorized', login: '/__gate/login' })
+      }
+      return redirect(res, '/__gate/login?next=' + encodeURIComponent(raw))
+    }
+
+    let cookie: string
+    try {
+      cookie = await harnessCookie()
+    } catch (err) {
+      log.warn('harness cookie exchange failed: ' + (err as Error).message)
+      return json(res, 503, { error: 'harness_unavailable' })
+    }
+    forward(req, res, cookie)
+  }
+}
