@@ -1,0 +1,16 @@
+# dsh-frontgate bundle patch.
+#
+# Safe defaults: listen on loopback only. A remote deployment overrides this in
+# the profile's own cordis.patch.yml (the profile entry wins):
+#
+#   - id: frontgate
+#     config:
+#       listenHost: '0.0.0.0'
+#       listenPort: 30010
+#
+- insert:
+    - id: frontgate
+      name: dsh-frontgate
+      config:
+        listenHost: '127.0.0.1'
+        listenPort: 3090

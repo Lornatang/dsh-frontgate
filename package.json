@@ -1,0 +1,57 @@
+{
+  "name": "dsh-frontgate",
+  "version": "1.0.0",
+  "description": "Small, hardened password gate and reverse proxy for the DeepSeek Harness Web UI: async scrypt login, revocable stateless sessions, Host/Origin rewrite, server-side launch-token exchange, WebSocket pass-through and a secure-context polyfill.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "scripts": {
+    "test": "node --test test/e2e.mjs",
+    "prepack": "node --test test/e2e.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "password",
+    "auth",
+    "login",
+    "reverse-proxy",
+    "websocket",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "author": "Lornatang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lornatang/dsh-frontgate.git"
+  },
+  "homepage": "https://github.com/Lornatang/dsh-frontgate#readme",
+  "bugs": {
+    "url": "https://github.com/Lornatang/dsh-frontgate/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
