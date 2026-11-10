@@ -128,7 +128,7 @@ The plugin follows the layout of the packages shipped with the harness:
 ## Development
 
 ```bash
-npm install       # dev dependencies: cordis types, esbuild, typescript
+npm ci            # install the pinned dev dependencies (package-lock.json)
 npm run typecheck # tsc --noEmit over src/
 npm test          # build, then node --test tests/*.test.mjs (19 tests)
 npm run build     # regenerate lib/index.js and lib/types/
