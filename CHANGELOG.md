@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 - 2026-11-10
+
+- Added `install.sh`, a one-command installer. It creates the profile from the
+  web template when the profile does not exist, installs the plugin, and
+  checks that the bundle was registered.
+- User-facing strings, README and package metadata are English-only.
+- Added `DSH_FRONTGATE_PASSWORD` and `DSH_FRONTGATE_PASSWORD_HASH` environment
+  overrides for container deployments.
+- Gate responses send `Strict-Transport-Security` when TLS is enabled.
+
 ## 1.0.0 - 2026-11-10
 
 First release.

@@ -1,86 +1,123 @@
 # dsh-frontgate
 
-给 DeepSeek Harness Web UI 加一道**密码门**的 DSH 插件：单文件、零运行时依赖、自带反向代理与 WebSocket 直通。
+Password gate and reverse proxy for the DeepSeek Harness Web UI. Keep `dsh`
+bound to loopback and expose this plugin instead: unauthenticated visitors can
+reach neither the UI nor `/api`, and the proxy handles Host/Origin and the
+harness launch token, so no extra flags are needed on the `dsh` command line.
 
-远程访问时让 `dsh` 继续绑在 `127.0.0.1`，只暴露本插件即可：未登录进不了 UI 和 `/api`；代理会自动处理 Host/Origin 与启动 token，无需改 DSH 启动参数。
+## Features
 
-## 特性
+- Password login. Page requests are redirected to the login page; `/api/*`
+  returns 401.
+- Reverse proxy to the local harness. The launch token is exchanged on the
+  server and cached, so the browser only holds the gate session cookie.
+- Stateless sessions. Changing the password invalidates every issued session.
+  No session table and no background timers.
+- Async scrypt verification, per-IP lockout, and limits on concurrent checks,
+  form size and body read time.
+- Loopback only by default, optional native TLS, and a `crypto.randomUUID`
+  fallback for plain-HTTP pages.
 
-- 单密码登录：未登录的页面请求跳登录页，`/api/*` 直接返回 401。
-- 反向代理到本机 `dsh`，启动 token 在服务端兑换并缓存，浏览器只持有网关自己的会话 Cookie。
-- 无状态会话：改密码（或删除状态文件）即全部下线，无会话表、无后台定时器。
-- 异步 scrypt 校验，每 IP 失败锁定，并发数 / 请求体 / 读取超时都有上限。
-- 默认只监听回环地址；可选原生 TLS；为明文 HTTP 页面补上 `crypto.randomUUID`。
+## Install
 
-## 安装
+Requires Node >= 22.19 and DSH >= 0.2.2-rc.1.
 
-需要 Node `>=22.19`、DSH `>=0.2.2-rc.1`。
+One command, which also creates the profile from the web template when it does
+not exist yet:
 
 ```bash
-# 从 GitHub 安装（锁定版本 tag）
-dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v1.0.0
+curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash
 ```
 
-离线安装：在能联网的机器上取包（`npm pack`，或下载仓库里的 `dsh-frontgate-1.0.0.tgz`），拷到目标机器后：
+To install into another profile:
 
 ```bash
-dsh plugin --profile <name> add ./dsh-frontgate-1.0.0.tgz
+curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash -s -- --profile <name>
 ```
 
-装完**重启该 profile** 生效。
+Or install manually:
 
-## 快速开始
+```bash
+dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v1.1.0
+```
 
-- 默认监听 `127.0.0.1:3090`，转发到本机 `dsh`。
-- 首次启动未配置密码时，日志会打印 `PASSWORD: xxxx-xxxx-xxxx-xxxx`；登录后在 profile 的 `cordis.patch.yml` 里换成固定密码。
-- 浏览器打开 `http://127.0.0.1:3090`。
+Offline: on a machine with network access unpack a checkout and run
+`npm pack`, copy the tarball over, then:
 
-## 配置
+```bash
+dsh plugin --profile <name> add ./dsh-frontgate-1.1.0.tgz
+```
 
-在 profile 的 `cordis.patch.yml`（如 `/root/.dsh/profiles/web/cordis.patch.yml`）追加：
+Restart the profile after installing.
+
+## Quick start
+
+- The gate listens on `127.0.0.1:3090` and forwards to the local harness.
+- With no password configured, the first start prints
+  `PASSWORD: xxxx-xxxx-xxxx-xxxx` and stores only its hash.
+- Set a fixed password with the `password` or `passwordHash` option below.
+- Open `http://127.0.0.1:3090`.
+
+## Configuration
+
+Append to the profile's `cordis.patch.yml`:
 
 ```yaml
 - id: frontgate
   config:
     listenHost: '0.0.0.0'
     listenPort: 30010
-    password: '换成你的密码'
+    password: 'change-me'
 ```
 
-| 配置项 | 默认值 | 说明 |
+| Option | Default | Description |
 | --- | --- | --- |
-| `listenHost` | `'127.0.0.1'` | 监听地址；远程访问改 `'0.0.0.0'` |
-| `listenPort` | `3090` | 监听端口；不得与 DSH 自身端口相同 |
-| `sessionDays` | `7` | 会话有效期（1–365 天） |
-| `title` | `'DeepSeek Harness'` | 登录页标题 |
-| `password` | `''` | 明文密码，启动时哈希，**不会**写盘 |
-| `passwordHash` | `''` | `scrypt$…` 哈希，优先级高于 `password` |
-| `maxAttempts` / `lockMinutes` | `5` / `5` | 每 IP 失败几次后锁定、锁定多少分钟 |
-| `tlsCertFile` / `tlsKeyFile` | `''` | 同时提供才启用 HTTPS（PEM） |
-| `trustProxy` | `false` | 是否信任反代传来的 `X-Forwarded-*` |
+| `listenHost` | `'127.0.0.1'` | Listen address. Use `'0.0.0.0'` for remote access. |
+| `listenPort` | `3090` | Listen port. Must differ from the harness port. |
+| `sessionDays` | `7` | Session lifetime in days (1 to 365). |
+| `title` | `'DeepSeek Harness'` | Login page title. |
+| `password` | `''` | Plain-text password, hashed at startup and not written to disk. |
+| `passwordHash` | `''` | `scrypt$...` hash. Takes precedence over `password`. |
+| `maxAttempts` / `lockMinutes` | `5` / `5` | Failures per client before lockout, and lockout length. |
+| `tlsCertFile` / `tlsKeyFile` | `''` | Set both to serve HTTPS. |
+| `trustProxy` | `false` | Trust `X-Forwarded-*` from your reverse proxy. |
 
-状态文件 `<profile>/data/dsh-frontgate.json`（权限 0600）保存密码哈希与会话签名密钥，删除它等于作废所有已发会话。
+`DSH_FRONTGATE_PASSWORD` and `DSH_FRONTGATE_PASSWORD_HASH` are read when the
+config sets neither, which keeps the password out of the patch file.
 
-## 远程 / Docker 部署
+The state file `<profile>/data/dsh-frontgate.json` (mode 0600) stores the
+password hash and the session signing secret. Deleting it invalidates every
+issued session.
 
-- 容器内把 `listenHost` 改为 `'0.0.0.0'`、`listenPort` 改成映射进去的端口；宿主只映射这一个端口，不要直接映射 `dsh` 的端口。
-- 明文 HTTP 只适合内网 / VPN。要上公网请启用 `tlsCertFile`/`tlsKeyFile`，或前置 Caddy/Nginx 终止 TLS 并设置 `trustProxy: true`。
-- 若 `dsh` 绑定在非回环地址，日志会警告可不经网关直连；请让它留在 `127.0.0.1`。
+## Remote and Docker deployment
 
-## 安全说明
+- In a container set `listenHost` to `'0.0.0.0'` and `listenPort` to the port
+  mapped from the host. Map only that port, not the harness port.
+- Plain HTTP is for a LAN or VPN. For public access enable
+  `tlsCertFile`/`tlsKeyFile`, or terminate TLS in Caddy or Nginx and set
+  `trustProxy: true`.
+- If `dsh` listens on a non-loopback address the log warns that the gate can
+  be bypassed. Keep it on `127.0.0.1`.
 
-- 会话 Cookie 用由密码哈希派生的密钥签名；改密码或删状态文件即全体下线。
-- 所有秘密比较走常量时间，密码只保存 scrypt 哈希。
-- 登录页无脚本，带 CSP、`no-store`、`no-referrer`、`X-Frame-Options`。
-- 代理目标固定为本机 DSH，不解析用户输入；上游 `Set-Cookie` 一律剥离。
+## Security notes
 
-已知取舍：单密码、无多用户、不能单独踢某个会话；没有管理后台，改配置 = 改 patch 后重启。
+- Sessions are HMAC-signed with a key derived from the password hash.
+- Secret comparisons are constant-time; only a scrypt hash is stored.
+- The login page has no scripts and sends CSP, `no-store`, `no-referrer` and
+  `X-Frame-Options`.
+- The proxy target is fixed to the local harness and never taken from user
+  input; upstream `Set-Cookie` headers are stripped.
+- With TLS enabled, gate responses also send HSTS.
 
-## 开发
+Known limits: one password for everyone, no multi-user accounts, no way to
+revoke a single session, and no admin page. Configuration changes need a patch
+edit and a restart.
+
+## Development
 
 ```bash
-npm test    # node --test test/e2e.mjs，18 项全过
-npm pack    # 打包（prepack 会先跑测试）
+npm test    # node --test test/e2e.mjs, 19 tests
+npm pack    # prepack runs the tests
 ```
 
 ## License
