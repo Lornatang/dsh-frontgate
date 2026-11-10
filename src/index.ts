@@ -15,7 +15,7 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
-import { COOKIE, HASH_RE, hashPassword, passwordVersion, randomPassword, verifyToken } from './auth.ts'
+import { COOKIE, HASH_RE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, verifyToken } from './auth.ts'
 import { resolveLogger } from './context.ts'
 import { clientIp, cookieValue, intOr, isLoopbackHost, originMatchesHost, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
@@ -59,6 +59,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
 
   // Password precedence: config hash, config password, env hash, env password,
   // state file, then a generated password shown once.
+  const configuredPassword = typeof cfg.password === 'string' ? cfg.password : ''
   const envPassword = typeof process.env.DSH_FRONTGATE_PASSWORD === 'string' ? process.env.DSH_FRONTGATE_PASSWORD : ''
   const envPasswordHash =
     typeof process.env.DSH_FRONTGATE_PASSWORD_HASH === 'string' && HASH_RE.test(process.env.DSH_FRONTGATE_PASSWORD_HASH)
@@ -66,9 +67,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
       : ''
   let passwordHash = ''
   if (typeof cfg.passwordHash === 'string' && cfg.passwordHash) passwordHash = cfg.passwordHash
-  else if (typeof cfg.password === 'string' && cfg.password) passwordHash = hashFor(String(cfg.password), state)
+  else if (configuredPassword) passwordHash = hashFor(assertStrongPassword(configuredPassword, 'the "password" option'), state)
   else if (envPasswordHash) passwordHash = envPasswordHash
-  else if (envPassword) passwordHash = hashFor(envPassword, state)
+  else if (envPassword) passwordHash = hashFor(assertStrongPassword(envPassword, 'DSH_FRONTGATE_PASSWORD'), state)
   else if (typeof state.passwordHash === 'string' && HASH_RE.test(state.passwordHash)) passwordHash = state.passwordHash
   if (!passwordHash) {
     const generated = randomPassword()
@@ -132,9 +133,14 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     })
   }
 
+  // Bound slow and idle clients: partial headers, half-sent requests and open
+  // sockets all get a finite budget. connectionsCheckingInterval keeps the
+  // deadlines from slipping a whole check period.
+  const serverOptions = { connectionsCheckingInterval: 5000, headersTimeout: 10000, requestTimeout: 30000 }
   const server = tlsOptions
-    ? https.createServer(tlsOptions, requestListener)
-    : http.createServer(requestListener)
+    ? https.createServer({ ...tlsOptions, ...serverOptions }, requestListener)
+    : http.createServer(serverOptions, requestListener)
+  server.maxConnections = 1024
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on('error', () => socket.destroy())

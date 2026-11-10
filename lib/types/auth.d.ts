@@ -4,6 +4,8 @@ export declare const COOKIE = "dsh_gate";
 export declare const TOKEN_VERSION = "v1";
 /** Longest accepted token, in characters. */
 export declare const MAX_TOKEN_LENGTH = 256;
+/** Shortest accepted configured password, in characters. */
+export declare const MIN_PASSWORD_LENGTH = 12;
 /** Stored hash format: scrypt$N$r$p$saltHex$keyHex. */
 export declare const HASH_RE: RegExp;
 /** scrypt cost parameters used when a new hash is created. */
@@ -13,6 +15,8 @@ export interface ScryptParams {
     p?: number;
     keylen?: number;
 }
+/** Reject configured passwords that are too short to survive guessing. */
+export declare function assertStrongPassword(password: string, source: string): string;
 /** Hash a password with scrypt; parameters travel with the hash. */
 export declare function hashPassword(password: string, params?: ScryptParams): string;
 /** Async verification: the event loop stays free while scrypt runs. */

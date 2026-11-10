@@ -25,6 +25,10 @@ function startUpstream() {
         res.writeHead(302, { location: 'http://127.0.0.1:' + port + '/target' })
         return res.end()
       }
+      if (req.url === '/redirect-relative') {
+        res.writeHead(302, { location: 'http://127.0.0.1:' + port + '//evil.example/target' })
+        return res.end()
+      }
       if (req.url === '/api/sessions') {
         res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'upstream=1' })
         return res.end(JSON.stringify({
@@ -267,6 +271,14 @@ test('upstream redirect Locations are rewritten', async (t) => {
   assert.equal(headers.get('location'), '/target')
 })
 
+test('protocol-relative upstream Locations stay on site', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const { res, headers } = await request(gate.port, '/redirect-relative', { headers: { cookie } })
+  assert.equal(res.status, 302)
+  assert.equal(headers.get('location'), '/')
+})
+
 test('logout clears the cookie', async (t) => {
   const { gate } = await withGate(t)
   const { res, cookies } = await request(gate.port, '/__gate/logout')
@@ -384,6 +396,35 @@ test('password can come from the environment', async (t) => {
   t.after(() => { delete process.env.DSH_FRONTGATE_PASSWORD })
   const { gate } = await withGate(t, { passwordHash: '' })
   const { res, cookie } = await login(gate.port, 'env-provided-password')
+  assert.equal(res.status, 303)
+  assert.ok(cookie)
+})
+
+test('short configured passwords are refused', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  t.after(async () => {
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const configured = makeCtx(upstream.port, dir)
+  assert.throws(
+    () => apply(configured.ctx, { listenPort: 0, passwordHash: '', password: 'short' }),
+    /at least 12 characters/,
+  )
+  process.env.DSH_FRONTGATE_PASSWORD = 'short'
+  t.after(() => { delete process.env.DSH_FRONTGATE_PASSWORD })
+  const fromEnv = makeCtx(upstream.port, dir)
+  assert.throws(
+    () => apply(fromEnv.ctx, { listenPort: 0, passwordHash: '' }),
+    /DSH_FRONTGATE_PASSWORD/,
+  )
+  // Exactly twelve characters are accepted.
+  const accepted = makeCtx(upstream.port, dir)
+  const gate = apply(accepted.ctx, { listenPort: 0, passwordHash: '', password: 'twelve-chars' })
+  await gate.ready()
+  t.after(() => { gate.stop(); accepted.dispose() })
+  const { res, cookie } = await login(gate.address().port, 'twelve-chars')
   assert.equal(res.status, 303)
   assert.ok(cookie)
 })

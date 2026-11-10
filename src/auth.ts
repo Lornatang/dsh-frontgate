@@ -12,6 +12,8 @@ export const COOKIE = 'dsh_gate'
 export const TOKEN_VERSION = 'v1'
 /** Longest accepted token, in characters. */
 export const MAX_TOKEN_LENGTH = 256
+/** Shortest accepted configured password, in characters. */
+export const MIN_PASSWORD_LENGTH = 12
 
 const SCRYPT = Object.freeze({ N: 32768, r: 8, p: 1, keylen: 32 })
 const PASSWORD_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567'
@@ -28,6 +30,18 @@ export interface ScryptParams {
 }
 
 const scryptMaxmem = (N: number, r: number): number => Math.max(64 * 1024 * 1024, 256 * N * r)
+
+/** Reject configured passwords that are too short to survive guessing. */
+export function assertStrongPassword(password: string, source: string): string {
+  const length = [...String(password)].length
+  if (length < MIN_PASSWORD_LENGTH) {
+    throw new Error(
+      'dsh-frontgate: ' + source + ' must be at least ' + MIN_PASSWORD_LENGTH +
+        ' characters; got ' + length,
+    )
+  }
+  return String(password)
+}
 
 /** Hash a password with scrypt; parameters travel with the hash. */
 export function hashPassword(password: string, params: ScryptParams = {}): string {

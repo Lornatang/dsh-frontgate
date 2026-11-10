@@ -127,7 +127,11 @@ export function createProxy(options: ProxyOptions): Proxy {
   function rewriteLocation(value: string): string {
     if (!value.startsWith(targetOrigin)) return value
     const rest = value.slice(targetOrigin.length)
-    return rest === '' || rest.startsWith('/') ? rest || '/' : value
+    if (rest === '') return '/'
+    // '//host' is protocol-relative and '\\host' is treated as '//host' by
+    // browsers; both would leave this origin.
+    if (rest.startsWith('//') || rest.startsWith('/\\')) return '/'
+    return rest.startsWith('/') ? rest : value
   }
 
   function forward(req: IncomingMessage, res: ServerResponse, cookie: string): void {

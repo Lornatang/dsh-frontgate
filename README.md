@@ -8,13 +8,13 @@ harness launch token, so no extra flags are needed on the `dsh` command line.
 ## Features
 
 - Password login. Page requests are redirected to the login page; `/api/*`
-  returns 401.
+  returns 401. A configured password must be at least 12 characters.
 - Reverse proxy to the local harness. The launch token is exchanged on the
   server and cached, so the browser only holds the gate session cookie.
 - Stateless sessions. Changing the password invalidates every issued session.
   No session table and no background timers.
 - Async scrypt verification, per-IP lockout, and limits on concurrent checks,
-  form size and body read time.
+  form size, body read time, header/request deadlines and connection count.
 - Loopback only by default, optional native TLS, and a `crypto.randomUUID`
   fallback for plain-HTTP pages.
 
@@ -67,7 +67,7 @@ Append to the profile's `cordis.patch.yml`:
   config:
     listenHost: '0.0.0.0'
     listenPort: 30010
-    password: 'change-me'
+    password: 'change-me-now'
 ```
 
 | Option | Default | Description |
@@ -76,14 +76,16 @@ Append to the profile's `cordis.patch.yml`:
 | `listenPort` | `3090` | Listen port. Must differ from the harness port. |
 | `sessionDays` | `7` | Session lifetime in days (1 to 365). |
 | `title` | `'DeepSeek Harness'` | Login page title. |
-| `password` | `''` | Plain-text password, hashed at startup and not written to disk. |
+| `password` | `''` | Plain-text password (at least 12 characters), hashed at startup and not written to disk. |
 | `passwordHash` | `''` | `scrypt$...` hash. Takes precedence over `password`. |
 | `maxAttempts` / `lockMinutes` | `5` / `5` | Failed logins per client before answers become 429, and the window. |
 | `tlsCertFile` / `tlsKeyFile` | `''` | Set both to serve HTTPS. |
 | `trustProxy` | `false` | Trust `X-Forwarded-*` from your reverse proxy. |
 
 `DSH_FRONTGATE_PASSWORD` and `DSH_FRONTGATE_PASSWORD_HASH` are read when the
-config sets neither, which keeps the password out of the patch file.
+config sets neither, which keeps the password out of the patch file. The
+12-character minimum applies to `DSH_FRONTGATE_PASSWORD` as well; a shorter
+value stops startup with an explicit error.
 
 The state file `<profile>/data/dsh-frontgate.json` (mode 0600) stores the
 password hash and the session signing secret. Deleting it invalidates every
@@ -115,7 +117,10 @@ issued session.
 - The login page has no scripts and sends CSP, `no-store`, `no-referrer` and
   `X-Frame-Options`.
 - The proxy target is fixed to the local harness and never taken from user
-  input; upstream `Set-Cookie` headers are stripped.
+  input; upstream `Set-Cookie` headers are stripped. Upstream redirects that
+  would leave this origin (protocol-relative or backslash forms) become `/`.
+- The listener closes clients that do not finish headers within 10 seconds or a
+  request within 30 seconds, and accepts at most 1024 concurrent connections.
 - With TLS enabled, gate responses also send HSTS.
 
 Known limits: one password for everyone, no multi-user accounts, no way to
@@ -139,7 +144,7 @@ The plugin follows the layout of the packages shipped with the harness:
 ```bash
 npm ci            # install the pinned dev dependencies (package-lock.json)
 npm run typecheck # tsc --noEmit over src/
-npm test          # build, then node --test tests/*.test.mjs (23 tests)
+npm test          # build, then node --test tests/*.test.mjs (25 tests)
 npm run build     # regenerate lib/index.js and lib/types/
 npm pack          # prepack rebuilds and reruns the tests
 ```

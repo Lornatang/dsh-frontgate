@@ -24,6 +24,12 @@ First release.
   is not a secure context).
 - Loopback-only by default, optional native TLS with HSTS; no admin page, no
   i18n, no mutable settings file.
+- A configured password (option or `DSH_FRONTGATE_PASSWORD`) must be at least
+  12 characters; shorter values stop startup with an explicit error.
+- Upstream redirects that would leave the origin (protocol-relative or
+  backslash forms) are rewritten to `/`.
+- The listener sets header and request deadlines, checks connection deadlines
+  every 5 seconds, and caps concurrent connections at 1024.
 - The state file (password hash and signing secret) is chmod 0600 on startup,
   including when it already existed with looser permissions.
 - Options are declared as a schemastery schema; sources are TypeScript modules
