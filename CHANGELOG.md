@@ -1,31 +1,11 @@
 # Changelog
 
-## 1.2.0 - 2026-11-10
-
-- Sources are now TypeScript modules under `src/`, one per concern. They are
-  bundled into `lib/index.js` by esbuild and shipped with generated type
-  declarations, matching the layout of the packages bundled with the harness.
-- Options are declared as a schemastery schema, so the harness validates them
-  and applies defaults before the plugin starts.
-- Tests moved to `tests/` and run against the built bundle.
-- License changed to Apache-2.0.
-
-## 1.1.0 - 2026-11-10
-
-- Added `install.sh`, a one-command installer. It creates the profile from the
-  web template when the profile does not exist, installs the plugin, and
-  checks that the bundle was registered.
-- User-facing strings, README and package metadata are English-only.
-- Added `DSH_FRONTGATE_PASSWORD` and `DSH_FRONTGATE_PASSWORD_HASH` environment
-  overrides for container deployments.
-- Gate responses send `Strict-Transport-Security` when TLS is enabled.
-
-## 1.0.0 - 2026-11-10
+## 0.1.0 - 2026-11-10
 
 First release.
 
 - Password gate for the DeepSeek Harness Web UI with a signed, stateless
-  session cookie (HMAC-SHA256, per-session nonce, sliding-free absolute TTL).
+  session cookie (HMAC-SHA256, per-session nonce, absolute TTL).
 - Session tokens embed a tag of the current password hash, so changing the
   password revokes every issued session without a session table.
 - Login uses async scrypt (N=32768, r=8, p=1, 32-byte key); no synchronous
@@ -39,6 +19,12 @@ First release.
 - WebSocket upgrades are authenticated, then spliced as raw TCP.
 - Adds a crypto.randomUUID polyfill to the harness HTML (plain HTTP on a LAN IP
   is not a secure context).
-- Loopback-only by default; optional native TLS; no admin page, no i18n, no
-  mutable settings file, no runtime dependencies.
-- Fixed relative `Location` rewriting for upstream redirects.
+- Loopback-only by default, optional native TLS with HSTS; no admin page, no
+  i18n, no mutable settings file.
+- Options are declared as a schemastery schema; sources are TypeScript modules
+  under " + B + "src/" + B + ", bundled into " + B + "lib/index.js" + B + " with generated type
+  declarations.
+- " + B + "install.sh" + B + " installs the plugin into a profile and creates the profile from
+  the web template when it does not exist yet.
+- " + B + "DSH_FRONTGATE_PASSWORD" + B + " and " + B + "DSH_FRONTGATE_PASSWORD_HASH" + B + " environment overrides
+  keep the password out of configuration files.

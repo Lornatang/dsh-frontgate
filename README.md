@@ -38,14 +38,14 @@ curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/instal
 Or install manually:
 
 ```bash
-dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v1.2.0
+dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v0.1.0
 ```
 
 Offline: on a machine with network access unpack a checkout and run
 `npm pack`, copy the tarball over, then:
 
 ```bash
-dsh plugin --profile <name> add ./dsh-frontgate-1.2.0.tgz
+dsh plugin --profile <name> add ./dsh-frontgate-0.1.0.tgz
 ```
 
 Restart the profile after installing.
