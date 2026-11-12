@@ -55,7 +55,7 @@ its port must differ from the harness port.
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `password` / `passwordHash` | empty | Fixed password (12+ characters) or scrypt hash; the hash takes precedence. |
-| `sessionDays` | `7` | Session lifetime, 1–365 days. |
+| `sessionDays` | `7` | Absolute session lifetime, 1–365 days. |
 | `maxAttempts` / `lockMinutes` | `5` / `5` | Failed attempts and lockout duration per client IP. |
 | `tlsCertFile` / `tlsKeyFile` | empty | Set both for direct HTTPS. |
 | `publicOrigin` | empty | External origin when a reverse proxy terminates HTTPS. |
@@ -63,8 +63,8 @@ its port must differ from the harness port.
 | `exchangeTimeoutMs` | `5000` | Harness token exchange timeout in milliseconds. |
 | `maxConnectionsPerPeer` | `64` | Simultaneous TCP connections per peer; `0` disables this limit. |
 | `maxPendingLoginsPerIp` | `4` | Incomplete login forms allowed per client IP. |
-| `upstreamHeaderTimeoutMs` | `60000` | Upstream response-header deadline, including queue time; `0` disables. |
-| `upstreamIdleTimeoutMs` | `300000` | Upstream response idle deadline; `0` disables. |
+| `upstreamHeaderTimeoutMs` | `0` | Upstream response-header deadline, including queue time; `0` disables. |
+| `upstreamIdleTimeoutMs` | `0` | Upstream response idle deadline; `0` disables. |
 | `upstreamCaFile` / `upstreamServerName` | empty | CA file and optional TLS hostname for a private HTTPS harness. |
 | `title` | `DeepSeek Harness` | Login page title. |
 
@@ -114,8 +114,16 @@ at the proxy when appropriate.
 HTTPS harness certificates and hostnames are verified. For a private CA, set
 `upstreamCaFile` to its PEM file; if the harness origin is an IP but its
 certificate names a DNS host, also set `upstreamServerName` to that host.
-For a stream that may be silent for more than five minutes, raise or disable
-`upstreamIdleTimeoutMs`.
+Upstream HTTP response deadlines are disabled by default so long or quiet
+Agent sessions can continue. Previously configured nonzero deadlines still
+apply. Set appropriate timeouts if you need to limit stalled requests, and
+check any reverse proxy's own timeouts as well.
+
+Signing out or reaching the configured session expiry closes that session's
+HTTP streams and WebSockets. Other sessions stay connected. Whether a
+disconnected request stops its underlying work depends on DSH and its plugins;
+allow important work to finish before signing out, changing the password, or
+restarting DSH.
 
 ## Troubleshooting
 
@@ -129,12 +137,19 @@ For a stream that may be silent for more than five minutes, raise or disable
 - **State file error:** Restore a trusted backup and ensure the file is owned
   by the DSH user with mode `0600`. If no backup exists, stop DSH and move the
   broken file aside; restart to create a new secret and invalidate sessions.
+- **Profile state is locked:** Stop the other gate using this profile. Updating
+  from an older version requires stopping the older process first.
 
 The state file is `~/.dsh/profiles/<name>/data/dsh-frontgate.json`. Keep it and
 its parent directories accessible only to trusted users. On Windows, use ACLs
-to restrict access. Sign-out revocations persist across restarts; each profile
-must have only one running gate instance. Expired revocations are removed on
-sign-out, and a full or unwritable revocation store makes sign-out fail safely.
+to restrict access. Sign-out revocations persist across restarts. Each profile
+allows one live gate, enforced by an OS-backed SQLite lock in the data
+directory; it is released automatically on process exit, including a crash.
+Use a filesystem that supports SQLite locking, and do not remove or replace
+the lock file while a gate is running. The Node.js built-in `node:sqlite`
+module must be enabled; some Node versions report an experimental warning.
+Expired revocations are removed on sign-out, and a full or unwritable
+revocation store makes sign-out fail safely.
 
 ## Development
 
@@ -146,5 +161,7 @@ npm test
 
 Browser tests require Chrome and OpenSSL; set `CHROME_PATH` if needed. They are
 required in CI and skipped locally when Chrome is unavailable.
+CI also checks login and WebSocket connectivity against DSH 0.2.2-rc.2 in an
+isolated profile.
 
 [Apache-2.0](LICENSE)

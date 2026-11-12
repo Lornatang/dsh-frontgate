@@ -3,8 +3,8 @@
  *
  * One password, one signed session cookie, one extra port. The plugin rewrites
  * Host and Origin so the harness accepts proxied requests, exchanges the launch
- * cookie on the server so the browser never sees it, and passes WebSocket
- * upgrades through untouched.
+ * cookie on the server so the browser never sees it, and filters the
+ * WebSocket handshake before forwarding upgraded connections.
  */
 import http from 'node:http'
 import https from 'node:https'
@@ -22,6 +22,7 @@ import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
 import { hashFor, readState, statePathFor, tightenState, writeState } from './state.ts'
+import { acquireStateLock } from './state-lock.ts'
 import { createSessionStore, sessionDigest } from './sessions.ts'
 
 /** Cordis metadata: the plugin id shown in logs and the services it waits for. */
@@ -45,6 +46,17 @@ export interface GateHandle {
  * defaults are applied again here so direct calls behave the same way.
  */
 export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
+  const statePath = statePathFor(ctx.profileContext?.patchPath)
+  const releaseStateLock = acquireStateLock(statePath)
+  try {
+    return start(ctx, config, statePath, releaseStateLock)
+  } catch (err) {
+    releaseStateLock()
+    throw err
+  }
+}
+
+function start(ctx: Context, config: Partial<Config>, statePath: string, releaseStateLock: () => void): GateHandle {
   const logger = resolveLogger(ctx)
   const cfg: Config = { ...DEFAULTS, ...config }
   const listenHost = String(cfg.listenHost)
@@ -71,7 +83,6 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     : undefined
 
   // Per-profile state: password hash + cookie signing secret, 0600.
-  const statePath = statePathFor(ctx.profileContext?.patchPath)
   const stateExists = tightenState(statePath)
   const state = readState(statePath, stateExists)
 
@@ -121,9 +132,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     throw new Error('dsh-frontgate: listenPort ' + listenPort + ' collides with the harness listener ' + targetOrigin)
   }
 
-  const upgrades = new Map<Duplex, { digest: string; timer?: NodeJS.Timeout }>()
+  const active = new Map<Duplex | ServerResponse, { digest: string; timer?: NodeJS.Timeout }>()
   const sessions = createSessionStore(statePath, persistedState, pv, (digest) => {
-    for (const [socket, entry] of upgrades) if (entry.digest === digest) socket.destroy()
+    for (const [connection, entry] of active) if (entry.digest === digest) connection.destroy()
   })
 
   const proxy = createProxy({
@@ -157,7 +168,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     harnessCookie: proxy.harnessCookie,
     validSession: sessions.valid,
     revokeSession: sessions.revoke,
-    forward: proxy.forward,
+    forward: (req, res, cookie, token) => {
+      if (!track(res, token)) return
+      proxy.forward(req, res, cookie)
+    },
     log: logger,
   })
 
@@ -193,20 +207,24 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
 
   let shuttingDown = false
 
-  function trackUpgrade(socket: Duplex, token: string): void {
+  function track(connection: Duplex | ServerResponse, token: string): boolean {
     const expiresAt = Number(token.split('.')[2]) * 1000
     const entry: { digest: string; timer?: NodeJS.Timeout } = { digest: sessionDigest(token) }
-    upgrades.set(socket, entry)
+    active.set(connection, entry)
     const arm = (): void => {
       const remaining = expiresAt - Date.now()
-      if (remaining <= 0) { socket.destroy(); return }
-      entry.timer = setTimeout(arm, Math.min(remaining, 2147483647))
+      if (remaining <= 0) { connection.destroy(); return }
+      // Recheck wall-clock expiry periodically so a forward clock adjustment
+      // cannot leave a connection open for the rest of a multi-day timer.
+      entry.timer = setTimeout(arm, Math.min(remaining, 60000))
+      entry.timer.unref()
     }
-    arm()
-    socket.once('close', () => {
+    connection.once('close', () => {
       if (entry.timer) clearTimeout(entry.timer)
-      upgrades.delete(socket)
+      active.delete(connection)
     })
+    arm()
+    return !connection.destroyed
   }
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -222,7 +240,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
         return
       }
-      trackUpgrade(socket, token)
+      if (!track(socket, token)) return
       // Drain and bound early frames while the shared exchange is pending.
       // Leaving an upgrade socket paused also hides a peer's FIN, which would
       // otherwise create an orphan upstream connection after it disconnected.
@@ -263,12 +281,14 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
   server.on('error', (err: Error) => logger.warn('listener error: ' + err.message))
 
   const shutdown = (): void => {
+    if (shuttingDown) return
     shuttingDown = true
-    for (const socket of upgrades.keys()) socket.destroy()
+    for (const connection of active.keys()) connection.destroy()
     proxy.destroy()
     const withConnections = server as http.Server & { closeAllConnections?: () => void }
     if (typeof withConnections.closeAllConnections === 'function') withConnections.closeAllConnections()
     server.close()
+    releaseStateLock()
   }
 
   ctx.effect(() => ctx.webServer.tapIndex(injectPolyfill), 'dsh-frontgate: secure-context polyfill')
@@ -298,7 +318,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
         resolve()
       })
     })
-    ready.catch((err: Error) => logger.warn('listen failed on ' + listenHost + ':' + listenPort + ': ' + err.message))
+    ready.catch((err: Error) => {
+      logger.warn('listen failed on ' + listenHost + ':' + listenPort + ': ' + err.message)
+      shutdown()
+    })
     return shutdown
   }, 'dsh-frontgate: listener')
 

@@ -12,6 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -29,4 +30,19 @@ jobs:
       - run: npm test
       - run: git diff --exit-code -- lib
       - run: npm audit --audit-level=high
-      - run: npm pack --dry-run --ignore-scripts
+      - run: npm run pack:verify
+
+  dsh-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm install --prefix "$RUNNER_TEMP/frontgate-dsh" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.2 pnpm@12.16.1
+      - run: npm run test:dsh
+        env:
+          DSH_TEST_INSTALL_DIR: ${{ runner.temp }}/frontgate-dsh

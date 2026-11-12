@@ -28,7 +28,7 @@ export interface GateOptions {
     harnessCookie(): Promise<string>;
     validSession(token: string): boolean;
     revokeSession(token: string): boolean;
-    forward(req: IncomingMessage, res: ServerResponse, cookie: string): void;
+    forward(req: IncomingMessage, res: ServerResponse, cookie: string, token: string): void;
     log: LogSink;
 }
 /** Build the request handler for one gate instance. */

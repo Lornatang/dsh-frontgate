@@ -7,8 +7,6 @@
  */
 import http from 'node:http'
 import https from 'node:https'
-import net from 'node:net'
-import tls from 'node:tls'
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { clientIp, connectHost, text } from './http.ts'
@@ -20,15 +18,21 @@ const HARNESS_COOKIE_TTL = 25 * 60 * 1000
 /** Headers that describe this hop or the browser, never the upstream request. */
 const REQUEST_DROP = new Set([
   'host', 'origin', 'cookie', 'connection', 'keep-alive', 'proxy-connection',
-  'transfer-encoding', 'upgrade', 'te', 'trailer', 'x-forwarded-for',
+  'proxy-authenticate', 'proxy-authorization', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'x-forwarded-for',
   'x-forwarded-proto', 'x-forwarded-host',
 ])
 
 /** Response headers that belong to the upstream connection, plus credentials. */
 const RESPONSE_DROP = new Set([
-  'set-cookie', 'connection', 'keep-alive', 'proxy-connection',
-  'transfer-encoding', 'upgrade', 'trailer',
+  'set-cookie', 'connection', 'keep-alive', 'proxy-connection', 'proxy-authenticate',
+  'proxy-authorization', 'transfer-encoding', 'upgrade', 'te', 'trailer',
 ])
+
+/** Connection can name additional hop-by-hop headers, regardless of case. */
+function connectionHeaders(value: string | string[] | undefined): Set<string> {
+  return new Set((Array.isArray(value) ? value.join(',') : value || '')
+    .split(',').map((part) => part.trim().toLowerCase()).filter(Boolean))
+}
 
 /** Options needed to reach and describe the harness listener. */
 export interface ProxyOptions {
@@ -140,8 +144,9 @@ export function createProxy(options: ProxyOptions): Proxy {
 
   function upstreamHeaders(req: IncomingMessage, cookie: string): OutgoingHttpHeaders {
     const out: OutgoingHttpHeaders = {}
+    const connection = connectionHeaders(req.headers.connection)
     for (const [key, value] of Object.entries(req.headers)) {
-      if (!REQUEST_DROP.has(key)) out[key] = value
+      if (!REQUEST_DROP.has(key) && !connection.has(key)) out[key] = value
     }
     out.host = target.host
     if (req.headers.origin !== undefined) out.origin = target.origin
@@ -186,11 +191,12 @@ export function createProxy(options: ProxyOptions): Proxy {
       headerTimer = undefined
       if (res.destroyed) { proxyRes.destroy(); return }
       const headers: OutgoingHttpHeaders = {}
+      const connection = connectionHeaders(proxyRes.headers.connection)
       for (const [key, value] of Object.entries(proxyRes.headers)) {
-        if (!RESPONSE_DROP.has(key)) headers[key] = value
+        if (!RESPONSE_DROP.has(key) && !connection.has(key)) headers[key] = value
       }
       const location = proxyRes.headers['location']
-      if (location !== undefined) headers.location = rewriteLocation(location)
+      if (location !== undefined && !connection.has('location')) headers.location = rewriteLocation(location)
       const status = proxyRes.statusCode || 502
       if (status === 401) invalidateHarnessCookie(cookie)
       res.writeHead(status, headers)
@@ -231,66 +237,110 @@ export function createProxy(options: ProxyOptions): Proxy {
     req.pipe(proxyReq)
   }
 
-  /** WebSocket/upgrade: authenticate, then splice raw TCP; no HTTP parsing. */
+  /** Parse and filter the handshake before splicing a successful upgrade. */
   function forwardUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, cookie: string): void {
-    const port = Number(target.port) || (secureUpstream ? 443 : 80)
-    const host = connectHost(target.hostname)
-    const lines = [req.method + ' ' + (req.url || '/') + ' HTTP/1.1']
-    const raw = req.rawHeaders || []
-    for (let i = 0; i + 1 < raw.length; i += 2) {
-      const lower = raw[i]!.toLowerCase()
-      if (lower === 'host' || lower === 'origin' || lower === 'cookie' || lower === 'proxy-connection') continue
-      if (lower === 'x-forwarded-for' || lower === 'x-forwarded-proto' || lower === 'x-forwarded-host') continue
-      if (lower === 'transfer-encoding') continue
-      lines.push(raw[i]! + ': ' + raw[i + 1]!)
+    const requested = req.headers.upgrade
+    if (typeof requested !== 'string' || !requested.trim()) {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      return
     }
-    lines.push('Host: ' + target.host)
-    if (req.headers.origin !== undefined) lines.push('Origin: ' + target.origin)
-    if (cookie) lines.push('Cookie: ' + cookie)
-    lines.push('X-Forwarded-For: ' + clientIp(req, trustProxy))
-    lines.push('X-Forwarded-Proto: ' + publicProto)
-    lines.push('X-Forwarded-Host: ' + String(req.headers.host || ''))
-    lines.push('', '')
-    const payload = lines.join('\r\n')
-
-    const backend = secureUpstream ? tls.connect({ host, port, ...tlsOptions }) : net.connect(port, host)
-    let closed = false
-    const teardown = (message?: string): void => {
-      if (closed) return
-      closed = true
+    const headers = upstreamHeaders(req, cookie)
+    headers.connection = 'Upgrade'
+    headers.upgrade = requested
+    const proxyReq = transport.request({
+      agent: false,
+      host: connectHost(target.hostname),
+      port: Number(target.port) || (secureUpstream ? 443 : 80),
+      method: req.method,
+      path: req.url,
+      headers,
+      maxHeaderSize: 16384,
+      ...tlsOptions,
+    })
+    let backend: Duplex | undefined
+    let finished = false
+    const pending = head.length ? [head] : []
+    let pendingBytes = head.length
+    const onPendingData = (chunk: Buffer): void => {
+      pendingBytes += chunk.length
+      if (pendingBytes > 65536) { socket.destroy(); proxyReq.destroy(); return }
+      pending.push(chunk)
+    }
+    const onPendingEnd = (): void => { socket.destroy(); proxyReq.destroy() }
+    let connectTimer: NodeJS.Timeout | undefined = setTimeout(() => fail(502, 'connect timeout'), 10000)
+    let headerTimer: NodeJS.Timeout | undefined = upstreamHeaderTimeoutMs
+      ? setTimeout(() => fail(504, 'response headers timeout'), upstreamHeaderTimeoutMs) : undefined
+    const clearTimers = (): void => {
+      if (connectTimer) clearTimeout(connectTimer)
+      if (headerTimer) clearTimeout(headerTimer)
+      connectTimer = undefined
+      headerTimer = undefined
+    }
+    const fail = (status: number, message?: string): void => {
+      if (finished) return
+      finished = true
+      clearTimers()
       if (message) log.warn('websocket ' + String(req.url || '/').split('?')[0] + ': ' + message)
-      socket.destroy()
-      backend.destroy()
+      if (!socket.destroyed) socket.end('HTTP/1.1 ' + status + ' ' + (http.STATUS_CODES[status] || 'Error') + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      proxyReq.destroy()
     }
-    const start = (): void => {
-      backend.setTimeout(0)
-      let statusLine = ''
-      let statusRead = false
-      backend.on('data', (chunk: Buffer) => {
-        if (statusRead) return
-        statusLine += chunk.toString('latin1', 0, Math.max(0, 256 - statusLine.length))
-        const end = statusLine.indexOf('\r\n')
-        if (end !== -1 || statusLine.length >= 256) {
-          statusRead = true
-          if (/^HTTP\/1\.[01] 401(?:\s|$)/.test(statusLine.slice(0, end === -1 ? undefined : end))) {
-            invalidateHarnessCookie(cookie)
-          }
-        }
-      })
-      backend.write(payload)
-      if (head && head.length) backend.write(head)
+    proxyReq.on('socket', (upstreamSocket) => {
+      const connected = (): void => { if (connectTimer) clearTimeout(connectTimer); connectTimer = undefined }
+      upstreamSocket.once(secureUpstream ? 'secureConnect' : 'connect', connected)
+    })
+    proxyReq.once('response', (response) => {
+      if (response.statusCode === 401) invalidateHarnessCookie(cookie)
+      const status = response.statusCode === 101 ? 502 : response.statusCode || 502
+      response.destroy()
+      fail(status)
+    })
+    proxyReq.once('upgrade', (response, upstreamSocket, responseHead) => {
+      if (finished || socket.destroyed) { upstreamSocket.destroy(); return }
+      const accepted = response.headers.upgrade
+      const connection = connectionHeaders(response.headers.connection)
+      if (typeof accepted !== 'string' || accepted.trim().toLowerCase() !== requested.trim().toLowerCase() || !connection.has('upgrade')) {
+        upstreamSocket.destroy()
+        fail(502, 'invalid upgrade response')
+        return
+      }
+      finished = true
+      clearTimers()
+      backend = upstreamSocket
+      socket.pause()
+      socket.off('data', onPendingData)
+      socket.off('end', onPendingEnd)
+      const drop = new Set([...RESPONSE_DROP, 'content-length', ...connection])
+      const lines = ['HTTP/1.1 101 Switching Protocols', 'Connection: Upgrade', 'Upgrade: ' + accepted]
+      for (let i = 0; i + 1 < response.rawHeaders.length; i += 2) {
+        const name = response.rawHeaders[i]!
+        if (!drop.has(name.toLowerCase())) lines.push(name + ': ' + response.rawHeaders[i + 1]!)
+      }
+      socket.write(lines.join('\r\n') + '\r\n\r\n')
+      if (responseHead.length) socket.write(responseHead)
+      if (pendingBytes) backend.write(Buffer.concat(pending, pendingBytes))
+      let backendEnded = false
+      backend.once('end', () => { backendEnded = true })
+      backend.on('error', () => socket.destroy())
+      backend.on('close', () => { if (!backendEnded) socket.destroy() })
       backend.pipe(socket)
       socket.pipe(backend)
-    }
-    backend.setTimeout(10000, () => teardown('connect timeout'))
-    if (secureUpstream) backend.once('secureConnect', start)
-    else backend.once('connect', start)
-    backend.on('error', (err: Error) => teardown(err.message))
-    socket.on('error', (err: Error) => teardown(err.message))
-    socket.on('end', () => teardown())
-    backend.on('end', () => teardown())
-    socket.on('close', () => teardown())
-    backend.on('close', () => teardown())
+    })
+    proxyReq.on('error', (err: Error) => {
+      if (socket.destroyed) { finished = true; clearTimers(); return }
+      fail(502, err.message)
+    })
+    socket.on('error', () => { proxyReq.destroy(); backend?.destroy() })
+    socket.once('close', () => {
+      clearTimers()
+      if (backend) backend.destroy()
+      else proxyReq.destroy()
+    })
+    // Read and bound early frames while the upstream handshake is pending.
+    // A paused socket would otherwise hide a client's FIN indefinitely.
+    socket.on('data', onPendingData)
+    socket.once('end', onPendingEnd)
+    socket.resume()
+    proxyReq.end()
   }
 
   return {

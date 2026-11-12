@@ -29,7 +29,7 @@ function startGate(dir, upstream, extra = {}) {
   return apply(ctx, { listenPort: 0, password, ...extra })
 }
 
-function makeUpstream() {
+function makeUpstream({ upgradeCookie = false } = {}) {
   let postReceived = false
   let upgradeReceived = false
   const sockets = new Set()
@@ -47,7 +47,8 @@ function makeUpstream() {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
     const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n')
+    const cookie = upgradeCookie ? 'Set-Cookie: upstream_leak=secret; HttpOnly; Path=/\r\n' : ''
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' + cookie + 'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n')
   })
   return {
     server,
@@ -68,7 +69,11 @@ async function startBrowser(dir) {
   try {
     let port
     for (let i = 0; i < 150; i++) {
-      try { port = Number(readFileSync(join(dir, 'chrome', 'DevToolsActivePort'), 'utf8').split('\n')[0]); break } catch { await delay(100) }
+      try {
+        const candidate = Number(readFileSync(join(dir, 'chrome', 'DevToolsActivePort'), 'utf8').split('\n')[0])
+        if (Number.isInteger(candidate) && candidate > 0) { port = candidate; break }
+      } catch {}
+      await delay(100)
     }
     assert.ok(port, 'Chrome debugging endpoint unavailable')
     const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json()
@@ -108,6 +113,7 @@ async function startBrowser(dir) {
     await send('Page.enable')
     return {
       async navigate(url) { const done = loaded(); await send('Page.navigate', { url }); await wait(done) },
+      async cookies() { return (await send('Network.getAllCookies')).cookies },
       async evaluate(expression) {
         const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
         if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails))
@@ -157,6 +163,35 @@ test('browser login succeeds and cross-port form and WebSocket attacks are refus
   assert.match(await browser.evaluate('document.body.innerText'), /forbidden/)
   assert.equal(upstream.postReceived(), false)
   assert.equal(upstream.upgradeReceived(), false)
+})
+
+test('browser websocket stays open without receiving an upstream cookie', browserOptions, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-upgrade-'))
+  const upstream = makeUpstream({ upgradeCookie: true })
+  await listen(upstream.server)
+  const gate = startGate(dir, upstream.server)
+  await gate.ready()
+  const port = gate.address().port
+  let browser
+  t.after(async () => {
+    await browser?.close()
+    gate.stop()
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+  })
+  browser = await startBrowser(dir)
+  await browser.navigate(`http://127.0.0.1:${port}/__gate/login`)
+  await browser.submit(`document.querySelector('input[name="password"]').value=${JSON.stringify(password)}; document.querySelector('form').requestSubmit()`)
+  const stayedOpen = await browser.evaluate(`new Promise(resolve => {
+    const ws = new WebSocket('ws://127.0.0.1:${port}/ws')
+    ws.onopen = () => setTimeout(() => { const open = ws.readyState === WebSocket.OPEN; ws.close(); resolve(open) }, 300)
+    ws.onerror = () => resolve(false)
+  })`)
+  assert.equal(stayedOpen, true)
+  assert.equal(upstream.upgradeReceived(), true)
+  const cookies = await browser.cookies()
+  assert.equal(cookies.some((cookie) => cookie.name === 'dsh_gate'), true)
+  assert.equal(cookies.some((cookie) => cookie.name === 'upstream_leak'), false)
 })
 
 test('browser login succeeds when the external and listener ports differ', browserOptions, async (t) => {

@@ -65,8 +65,8 @@ export const DEFAULTS: Config = {
   exchangeTimeoutMs: 5000,
   maxConnectionsPerPeer: 64,
   maxPendingLoginsPerIp: 4,
-  upstreamHeaderTimeoutMs: 60000,
-  upstreamIdleTimeoutMs: 300000,
+  upstreamHeaderTimeoutMs: 0,
+  upstreamIdleTimeoutMs: 0,
   upstreamCaFile: '',
   upstreamServerName: '',
 }

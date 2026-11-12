@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 - 2026-11-12
+
+- Close HTTP streams, as well as WebSockets, when their gate session is revoked
+  or expires; leave other sessions connected.
+- Filter upstream cookies and hop-by-hop headers from WebSocket handshakes and
+  reject invalid upgrades. Allow only one live gate per state directory, with
+  an OS-backed lock that is released when the process exits.
+- Disable upstream header and idle deadlines by default for long-running and
+  quiet Agent sessions. Explicitly configured deadlines still apply.
+- Exercise session isolation, crash recovery, long streams, installed package
+  startup and DSH 0.2.2-rc.2 connectivity in the test suite and CI.
+
 ## 0.1.2 - 2026-11-12
 
 - Persist session revocations on sign-out, reject alternate token encodings,
