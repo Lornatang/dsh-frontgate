@@ -109,6 +109,9 @@ export const GATE_HEADERS: OutgoingHttpHeaders = {
   'x-frame-options': 'DENY',
 }
 
+/** Keep cross-origin referrers private without suppressing the login form's Origin. */
+export const LOGIN_REFERRER_POLICY = 'same-origin'
+
 /** Write a complete response. */
 export function send(res: ServerResponse, status: number, headers: OutgoingHttpHeaders, body: string | Buffer): void {
   res.writeHead(status, headers)
@@ -116,7 +119,7 @@ export function send(res: ServerResponse, status: number, headers: OutgoingHttpH
 }
 
 export const html = (res: ServerResponse, status: number, body: string): void =>
-  send(res, status, { ...GATE_HEADERS, 'content-type': 'text/html; charset=utf-8' }, body)
+  send(res, status, { ...GATE_HEADERS, 'referrer-policy': LOGIN_REFERRER_POLICY, 'content-type': 'text/html; charset=utf-8' }, body)
 
 export const json = (res: ServerResponse, status: number, payload: unknown): void =>
   send(res, status, { ...GATE_HEADERS, 'content-type': 'application/json; charset=utf-8' }, JSON.stringify(payload))

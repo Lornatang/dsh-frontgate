@@ -4,6 +4,12 @@
 
 First release.
 
+- Fix browser login failing with `Origin check failed` when the login page's
+  referrer policy caused browsers to send `Origin: null` on form submissions.
+- Print a reminder to save the generated password after its hash is stored.
+- Resolve the release tag to its commit when installing, so replacing a tag
+  does not leave an existing installation on a cached archive.
+- Create the default web profile correctly on first install.
 - Password gate for the DeepSeek Harness Web UI with a signed, stateless
   session cookie (HMAC-SHA256, per-session nonce, absolute TTL).
 - Session tokens embed a tag of the current password hash, so changing the

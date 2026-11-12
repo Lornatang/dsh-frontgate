@@ -50,11 +50,24 @@ dsh plugin --profile <name> add ./dsh-frontgate-0.1.0.tgz
 
 Restart the profile after installing.
 
+## Update an existing installation
+
+Run the same install command again, selecting the original profile if it is not
+`web`, then restart that profile. When `git` is available, the installer
+resolves the tag to its current commit so an updated tag does not reuse a
+cached archive. If it warns that the tag could not be resolved, install `git`,
+check GitHub connectivity, and rerun it.
+
+Updating keeps the profile configuration and the saved password hash. It does
+not generate or print a new password.
+
 ## Quick start
 
 - The gate listens on `127.0.0.1:3090` and forwards to the local harness.
-- With no password configured, the first start prints
-  `PASSWORD: xxxx-xxxx-xxxx-xxxx` and stores only its hash.
+- With no password configured or saved, the first start prints
+  `PASSWORD: xxxx-xxxx-xxxx-xxxx` to stderr and stores only its hash. Save it
+  then; it is not printed again. If stderr is redirected, find it in the
+  service's startup log.
 - Set a fixed password with the `password` or `passwordHash` option below.
 - Open `http://127.0.0.1:3090`.
 
@@ -114,8 +127,9 @@ issued session.
   by the scrypt cost and the scrypt concurrency cap.
 - Secret comparisons are constant-time; the state file holds the scrypt hash and
   the signing secret, never the password, and is chmod 0600 on startup.
-- The login page has no scripts and sends CSP, `no-store`, `no-referrer` and
-  `X-Frame-Options`.
+- The login page has no scripts and sends CSP, `no-store`, a `same-origin`
+  referrer policy and `X-Frame-Options`. The referrer policy keeps cross-origin
+  referrers private while allowing the browser to send the form's `Origin`.
 - The proxy target is fixed to the local harness and never taken from user
   input; upstream `Set-Cookie` headers are stripped. Upstream redirects that
   would leave this origin (protocol-relative or backslash forms) become `/`.
@@ -144,7 +158,7 @@ The plugin follows the layout of the packages shipped with the harness:
 ```bash
 npm ci            # install the pinned dev dependencies (package-lock.json)
 npm run typecheck # tsc --noEmit over src/
-npm test          # build, then node --test tests/*.test.mjs (25 tests)
+npm test          # build, then node --test tests/*.test.mjs
 npm run build     # regenerate lib/index.js and lib/types/
 npm pack          # prepack rebuilds and reruns the tests
 ```

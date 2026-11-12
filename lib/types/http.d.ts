@@ -33,6 +33,8 @@ export declare const escapeHtml: (text: unknown) => string;
 export declare const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 /** Headers attached to every response the gate writes itself. */
 export declare const GATE_HEADERS: OutgoingHttpHeaders;
+/** Keep cross-origin referrers private without suppressing the login form's Origin. */
+export declare const LOGIN_REFERRER_POLICY = "same-origin";
 /** Write a complete response. */
 export declare function send(res: ServerResponse, status: number, headers: OutgoingHttpHeaders, body: string | Buffer): void;
 export declare const html: (res: ServerResponse, status: number, body: string) => void;

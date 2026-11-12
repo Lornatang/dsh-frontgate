@@ -58,7 +58,11 @@ node -e '
 
 if [ ! -f "$PROFILE_DIR/package.json" ]; then
   echo "creating profile '$PROFILE' from the web template"
-  dsh "$PROFILE" --from-default-profile web --help >/dev/null 2>&1 || true
+  if [ "$PROFILE" = "web" ]; then
+    dsh "$PROFILE" --help >/dev/null 2>&1 || true
+  else
+    dsh "$PROFILE" --from-default-profile web --help >/dev/null 2>&1 || true
+  fi
   [ -f "$PROFILE_DIR/package.json" ] || die "could not create profile '$PROFILE'"
 fi
 
@@ -82,12 +86,31 @@ run_limited() {
   fi
 }
 
+REVISION=""
+if command -v git >/dev/null 2>&1; then
+  REFS="$(run_limited 30 git ls-remote "https://github.com/$REPO.git" \
+    "refs/tags/$VERSION" "refs/tags/$VERSION^{}" 2>/dev/null || true)"
+  REVISION="$(printf '%s\n' "$REFS" | awk -v tag="refs/tags/$VERSION" '
+    $2 == tag { direct = $1 }
+    $2 == tag "^{}" { peeled = $1 }
+    END { if (peeled) print peeled; else if (direct) print direct }
+  ')"
+fi
+
+if [ ${#REVISION} -eq 40 ] && [[ "$REVISION" != *[!0-9a-f]* ]]; then
+  SOURCE_REF="$REVISION"
+else
+  echo "warning: could not resolve $VERSION to a commit; an update may use a cached copy" >&2
+  SOURCE_REF="refs/tags/$VERSION"
+  REVISION="$VERSION"
+fi
+
 echo "installing dsh-frontgate $VERSION into profile '$PROFILE'"
-ARCHIVE="https://codeload.github.com/$REPO/tar.gz/refs/tags/$VERSION"
+ARCHIVE="https://codeload.github.com/$REPO/tar.gz/$SOURCE_REF"
 
 if ! run_limited 300 dsh plugin --profile "$PROFILE" add "$ARCHIVE"; then
   echo "archive install failed, retrying with git"
-  run_limited 180 dsh plugin --profile "$PROFILE" add "github:$REPO#$VERSION" \
+  run_limited 180 dsh plugin --profile "$PROFILE" add "github:$REPO#$REVISION" \
     || die "installation failed; run 'dsh plugin --profile $PROFILE add github:$REPO#$VERSION' manually"
 fi
 
@@ -98,8 +121,8 @@ cat <<EOF
 dsh-frontgate $VERSION is installed in profile '$PROFILE'.
 
 Restart the harness process that serves this profile, then open the gate.
-The gate listens on 127.0.0.1:3090 by default; the first start prints a
-generated password as PASSWORD: xxxx-xxxx-xxxx-xxxx.
+The gate listens on 127.0.0.1:3090 by default. When no password is configured
+or saved, the first start prints PASSWORD: xxxx-xxxx-xxxx-xxxx to stderr.
 
 To expose it on the network, set listenHost and listenPort in
 $PROFILE_DIR/cordis.patch.yml.

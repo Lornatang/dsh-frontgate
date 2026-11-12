@@ -3,7 +3,7 @@
  *
  * It is inline-styled and script-free so that a strict CSP can be applied.
  */
-import { escapeHtml } from './http.ts'
+import { escapeHtml, LOGIN_REFERRER_POLICY } from './http.ts'
 
 /** Render the login page for a given title, post-login path and error message. */
 export function loginPage(title: string, next: string, error: string): string {
@@ -13,7 +13,7 @@ export function loginPage(title: string, next: string, error: string): string {
     '<!doctype html>',
     '<html lang="en"><head><meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<meta name="referrer" content="no-referrer">',
+    '<meta name="referrer" content="' + LOGIN_REFERRER_POLICY + '">',
     '<title>' + escapeHtml(title) + ' - Sign in</title>',
     '<style>',
     '  :root{color-scheme:dark}',

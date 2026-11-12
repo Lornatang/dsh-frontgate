@@ -66,22 +66,26 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
       ? process.env.DSH_FRONTGATE_PASSWORD_HASH
       : ''
   let passwordHash = ''
+  let generatedPassword = ''
   if (typeof cfg.passwordHash === 'string' && cfg.passwordHash) passwordHash = cfg.passwordHash
   else if (configuredPassword) passwordHash = hashFor(assertStrongPassword(configuredPassword, 'the "password" option'), state)
   else if (envPasswordHash) passwordHash = envPasswordHash
   else if (envPassword) passwordHash = hashFor(assertStrongPassword(envPassword, 'DSH_FRONTGATE_PASSWORD'), state)
   else if (typeof state.passwordHash === 'string' && HASH_RE.test(state.passwordHash)) passwordHash = state.passwordHash
   if (!passwordHash) {
-    const generated = randomPassword()
-    passwordHash = hashPassword(generated)
-    logger.info('no password configured - generated a random one and saved its hash to ' + statePath)
-    logger.info('PASSWORD: ' + generated)
+    generatedPassword = randomPassword()
+    passwordHash = hashPassword(generatedPassword)
   }
 
   const secret = typeof state.secret === 'string' && state.secret.length >= 64 ? state.secret : randomBytes(32).toString('hex')
   const pv = passwordVersion(passwordHash)
   if (state.passwordHash !== passwordHash || state.secret !== secret) {
     writeState(statePath, { passwordHash, secret, createdAt: state.createdAt || new Date().toISOString() })
+  }
+  if (generatedPassword) {
+    logger.info('no password configured - generated a random one and saved its hash to ' + statePath)
+    logger.info('PASSWORD: ' + generatedPassword)
+    logger.info('save this password now; it will not be shown again')
   }
 
   const targetOrigin = ctx.webServer.getOrigin()

@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import net from 'node:net'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, hashPassword, injectPolyfill } from '../lib/index.js'
@@ -205,8 +206,10 @@ test('login page sends restrictive headers', async (t) => {
   assert.match(res.headers.get('content-security-policy'), /default-src 'none'/)
   assert.match(res.headers.get('content-security-policy'), /form-action 'self'/)
   assert.equal(res.headers.get('cache-control'), 'no-store')
+  assert.equal(res.headers.get('referrer-policy'), 'same-origin')
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff')
   assert.match(body, /<html lang="en">/)
+  assert.match(body, /<meta name="referrer" content="same-origin">/)
   assert.match(body, /<form method="post"/)
   assert.match(body, /Sign in/)
   assert.ok(!body.includes('<script'))
@@ -218,6 +221,8 @@ test('wrong password is rejected without a session', async (t) => {
   assert.equal(res.status, 401)
   assert.equal(cookies.length, 0)
   assert.match(body, /Wrong password\./)
+  assert.equal(res.headers.get('referrer-policy'), 'same-origin')
+  assert.match(body, /<meta name="referrer" content="same-origin">/)
 })
 
 test('cross-site login requests are rejected', async (t) => {
@@ -227,9 +232,18 @@ test('cross-site login requests are rejected', async (t) => {
   assert.equal(cookies.length, 0)
 })
 
+test('null origins and cross-site form submissions remain rejected', async (t) => {
+  const { gate } = await withGate(t)
+  for (const headers of [{ origin: 'null', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-site': 'cross-site' }]) {
+    const { res, cookies } = await login(gate.port, PASSWORD, '/', headers)
+    assert.equal(res.status, 403)
+    assert.equal(cookies.length, 0)
+  }
+})
+
 test('correct password issues a session cookie', async (t) => {
   const { gate } = await withGate(t)
-  const { res, cookies } = await login(gate.port)
+  const { res, cookies } = await login(gate.port, PASSWORD, '/', { 'sec-fetch-site': 'same-origin' })
   assert.equal(res.status, 303)
   assert.equal(res.headers.get('location'), '/')
   assert.equal(cookies.length, 1)
@@ -389,6 +403,51 @@ test('changing the password revokes old sessions', async (t) => {
   const fresh = await login(second.port, 'a-brand-new-password')
   assert.equal(fresh.res.status, 303)
   assert.ok(fresh.cookie)
+})
+
+test('a generated password is printed once and remains valid after restart', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  t.after(async () => {
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const script = `
+    import { join } from 'node:path'
+    import { apply } from './lib/index.js'
+    const ctx = {
+      profileContext: { patchPath: join(process.argv[1], 'cordis.patch.yml') },
+      webServer: { getOrigin: () => 'http://127.0.0.1:1', tapIndex: () => () => {} },
+      connection: { authenticatedUrl: url => url },
+      effect: fn => fn(),
+    }
+    const gate = apply(ctx, { listenPort: 0 })
+    await gate.ready()
+    gate.stop()
+  `
+  const env = { ...process.env }
+  delete env.DSH_FRONTGATE_PASSWORD
+  delete env.DSH_FRONTGATE_PASSWORD_HASH
+  const start = () => spawnSync(process.execPath, ['--input-type=module', '-e', script, dir], {
+    cwd: new URL('..', import.meta.url), env, encoding: 'utf8',
+  })
+
+  const first = start()
+  assert.equal(first.status, 0)
+  const generated = first.stderr.match(/^\[dsh-frontgate\] PASSWORD: ([a-z2-7]{4}(?:-[a-z2-7]{4}){3})$/m)?.[1]
+  assert.ok(generated)
+  const state = readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8')
+  assert.ok(!state.includes(generated))
+
+  const second = start()
+  assert.equal(second.status, 0)
+  assert.doesNotMatch(second.stderr, /\[dsh-frontgate\] PASSWORD:/)
+  assert.equal(readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8'), state)
+
+  const gate = await startGate(upstream.port, dir, { passwordHash: JSON.parse(state).passwordHash })
+  t.after(() => gate.dispose())
+  assert.equal((await login(gate.port, generated)).res.status, 303)
 })
 
 test('password can come from the environment', async (t) => {
