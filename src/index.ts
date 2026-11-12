@@ -11,17 +11,18 @@ import https from 'node:https'
 import { randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
-import { COOKIE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, validPasswordHash, verifyToken } from './auth.ts'
+import { COOKIE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, validPasswordHash } from './auth.ts'
 import { resolveLogger } from './context.ts'
 import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, sameOrigin, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
 import { hashFor, readState, statePathFor, tightenState, writeState } from './state.ts'
+import { createSessionStore, sessionDigest } from './sessions.ts'
 
 /** Cordis metadata: the plugin id shown in logs and the services it waits for. */
 export const name = 'dsh-frontgate'
@@ -52,6 +53,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
   const maxAttempts = intOr(cfg.maxAttempts, DEFAULTS.maxAttempts, 1, 50)
   const lockMs = intOr(cfg.lockMinutes, DEFAULTS.lockMinutes, 1, 1440) * 60000
   const exchangeTimeoutMs = intOr(cfg.exchangeTimeoutMs, DEFAULTS.exchangeTimeoutMs, 100, 60000)
+  const maxConnectionsPerPeer = intOr(cfg.maxConnectionsPerPeer, DEFAULTS.maxConnectionsPerPeer, 0, 1024)
+  const maxPendingLoginsPerIp = intOr(cfg.maxPendingLoginsPerIp, DEFAULTS.maxPendingLoginsPerIp, 1, 128)
+  const upstreamHeaderTimeoutMs = intOr(cfg.upstreamHeaderTimeoutMs, DEFAULTS.upstreamHeaderTimeoutMs, 0, 3600000)
+  const upstreamIdleTimeoutMs = intOr(cfg.upstreamIdleTimeoutMs, DEFAULTS.upstreamIdleTimeoutMs, 0, 3600000)
   const useTls = Boolean(cfg.tlsCertFile || cfg.tlsKeyFile)
   if (useTls && !(cfg.tlsCertFile && cfg.tlsKeyFile)) {
     throw new Error('dsh-frontgate: tlsCertFile and tlsKeyFile must be set together')
@@ -93,10 +98,16 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     passwordHash = hashPassword(generatedPassword)
   }
 
-  const secret = typeof state.secret === 'string' && state.secret.length >= 64 ? state.secret : randomBytes(32).toString('hex')
+  const passwordChanged = stateExists && state.passwordHash !== passwordHash
+  const secret = !passwordChanged && typeof state.secret === 'string' && state.secret.length >= 64
+    ? state.secret : randomBytes(32).toString('hex')
   const pv = passwordVersion(passwordHash)
+  const persistedState = {
+    passwordHash, secret, createdAt: state.createdAt || new Date().toISOString(),
+    revokedSessions: passwordChanged ? [] : state.revokedSessions ?? [],
+  }
   if (state.passwordHash !== passwordHash || state.secret !== secret) {
-    writeState(statePath, { passwordHash, secret, createdAt: state.createdAt || new Date().toISOString() })
+    writeState(statePath, persistedState)
   }
   if (generatedPassword) {
     logger.info('no password configured - generated a random one and saved its hash to ' + statePath)
@@ -110,11 +121,20 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     throw new Error('dsh-frontgate: listenPort ' + listenPort + ' collides with the harness listener ' + targetOrigin)
   }
 
+  const upgrades = new Map<Duplex, { digest: string; timer?: NodeJS.Timeout }>()
+  const sessions = createSessionStore(statePath, persistedState, pv, (digest) => {
+    for (const [socket, entry] of upgrades) if (entry.digest === digest) socket.destroy()
+  })
+
   const proxy = createProxy({
     targetOrigin,
     publicProto,
     trustProxy: Boolean(cfg.trustProxy),
     exchangeTimeoutMs,
+    upstreamHeaderTimeoutMs,
+    upstreamIdleTimeoutMs,
+    upstreamCa: cfg.upstreamCaFile ? readFileSync(String(cfg.upstreamCaFile)) : undefined,
+    upstreamServerName: String(cfg.upstreamServerName || ''),
     authenticatedUrl: (baseUrl) => ctx.connection.authenticatedUrl(baseUrl),
     log: logger,
   })
@@ -127,6 +147,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
       pv,
       sessionSeconds,
       maxAttempts,
+      maxPendingLoginsPerIp,
       lockMs,
       trustProxy: Boolean(cfg.trustProxy),
       useTls,
@@ -134,6 +155,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
       secureCookie: publicProto === 'https',
     },
     harnessCookie: proxy.harnessCookie,
+    validSession: sessions.valid,
+    revokeSession: sessions.revoke,
     forward: proxy.forward,
     log: logger,
   })
@@ -155,11 +178,42 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     ? https.createServer({ ...tlsOptions, ...serverOptions }, requestListener)
     : http.createServer(serverOptions, requestListener)
   server.maxConnections = 1024
+  const peers = new Map<string, number>()
+  if (maxConnectionsPerPeer > 0) server.on('connection', (socket: Socket) => {
+    const peer = String(socket.remoteAddress || 'unknown').replace(/^::ffff:/, '')
+    const count = peers.get(peer) ?? 0
+    if (count >= maxConnectionsPerPeer) { socket.destroy(); return }
+    peers.set(peer, count + 1)
+    socket.once('close', () => {
+      const remaining = (peers.get(peer) ?? 1) - 1
+      if (remaining <= 0) peers.delete(peer)
+      else peers.set(peer, remaining)
+    })
+  })
+
+  let shuttingDown = false
+
+  function trackUpgrade(socket: Duplex, token: string): void {
+    const expiresAt = Number(token.split('.')[2]) * 1000
+    const entry: { digest: string; timer?: NodeJS.Timeout } = { digest: sessionDigest(token) }
+    upgrades.set(socket, entry)
+    const arm = (): void => {
+      const remaining = expiresAt - Date.now()
+      if (remaining <= 0) { socket.destroy(); return }
+      entry.timer = setTimeout(arm, Math.min(remaining, 2147483647))
+    }
+    arm()
+    socket.once('close', () => {
+      if (entry.timer) clearTimeout(entry.timer)
+      upgrades.delete(socket)
+    })
+  }
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     socket.on('error', () => socket.destroy())
     try {
-      if (!sessionOf(req)) {
+      const token = cookieValue(req.headers.cookie, COOKIE)
+      if (!token || !sessions.valid(token)) {
         socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
         return
       }
@@ -168,9 +222,32 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
         return
       }
+      trackUpgrade(socket, token)
+      // Drain and bound early frames while the shared exchange is pending.
+      // Leaving an upgrade socket paused also hides a peer's FIN, which would
+      // otherwise create an orphan upstream connection after it disconnected.
+      const chunks: Buffer[] = head.length ? [head] : []
+      let pendingBytes = head.length
+      const onEarlyData = (chunk: Buffer): void => {
+        pendingBytes += chunk.length
+        if (pendingBytes > 65536) { socket.destroy(); return }
+        chunks.push(chunk)
+      }
+      const onEarlyEnd = (): void => { socket.destroy() }
+      socket.on('data', onEarlyData)
+      socket.once('end', onEarlyEnd)
+      if (pendingBytes > 65536) { socket.destroy(); return }
+      socket.resume()
       proxy.harnessCookie()
-        .then((cookie) => proxy.forwardUpgrade(req, socket, head, cookie))
+        .then((cookie) => {
+          if (shuttingDown || socket.destroyed || !sessions.valid(token)) return
+          socket.pause()
+          socket.off('data', onEarlyData)
+          socket.off('end', onEarlyEnd)
+          proxy.forwardUpgrade(req, socket, Buffer.concat(chunks, pendingBytes), cookie)
+        })
         .catch((err: Error) => {
+          if (socket.destroyed) return
           logger.warn('websocket blocked: ' + err.message)
           socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
         })
@@ -185,12 +262,9 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
   })
   server.on('error', (err: Error) => logger.warn('listener error: ' + err.message))
 
-  function sessionOf(req: IncomingMessage): boolean {
-    const token = cookieValue(req.headers.cookie, COOKIE)
-    return Boolean(token) && verifyToken(secret, pv, token)
-  }
-
   const shutdown = (): void => {
+    shuttingDown = true
+    for (const socket of upgrades.keys()) socket.destroy()
     proxy.destroy()
     const withConnections = server as http.Server & { closeAllConnections?: () => void }
     if (typeof withConnections.closeAllConnections === 'function') withConnections.closeAllConnections()
@@ -215,7 +289,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
           logger.warn('use a dedicated hostname or IP: browser cookies are shared across ports')
         }
         if (cfg.trustProxy) {
-          logger.warn('trustProxy is enabled; restrict access to this listener to trusted proxies')
+          logger.warn('trustProxy is enabled; restrict access to this listener to trusted proxies; TCP peer limits apply to the proxy')
         }
         const bound = ctx.webServer.config?.host
         if (typeof bound === 'string' && !isLoopbackHost(bound)) {

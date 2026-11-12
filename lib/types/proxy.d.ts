@@ -11,6 +11,10 @@ export interface ProxyOptions {
     trustProxy: boolean;
     /** Maximum time spent exchanging a launch token, including connection time. */
     exchangeTimeoutMs: number;
+    upstreamHeaderTimeoutMs: number;
+    upstreamIdleTimeoutMs: number;
+    upstreamCa?: Buffer;
+    upstreamServerName: string;
     /** Absolute entry URL with the harness launch token attached. */
     authenticatedUrl(baseUrl: string): string;
     log: LogSink;

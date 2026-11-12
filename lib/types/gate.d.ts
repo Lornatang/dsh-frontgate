@@ -15,6 +15,7 @@ export interface GateRuntime {
     pv: string;
     sessionSeconds: number;
     maxAttempts: number;
+    maxPendingLoginsPerIp: number;
     lockMs: number;
     trustProxy: boolean;
     useTls: boolean;
@@ -25,6 +26,8 @@ export interface GateRuntime {
 export interface GateOptions {
     runtime: GateRuntime;
     harnessCookie(): Promise<string>;
+    validSession(token: string): boolean;
+    revokeSession(token: string): boolean;
     forward(req: IncomingMessage, res: ServerResponse, cookie: string): void;
     log: LogSink;
 }

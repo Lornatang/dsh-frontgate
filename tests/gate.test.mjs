@@ -2,26 +2,44 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import http from 'node:http'
+import https from 'node:https'
 import net from 'node:net'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { apply, hashPassword, injectPolyfill } from '../lib/index.js'
 
 const PASSWORD = 'correct horse battery staple'
 const HASH = hashPassword(PASSWORD)
 
-function startUpstream({ hangExchanges = 0 } = {}) {
+function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
   return new Promise((resolve) => {
     const seen = []
     const sockets = new Set()
     let port = 0
+    let currentCookie = 'launch-token'
     const server = http.createServer((req, res) => {
       seen.push({ method: req.method, url: req.url, headers: req.headers })
       if (req.url.startsWith('/?token=')) {
         if (hangExchanges > 0) { hangExchanges -= 1; return }
-        res.writeHead(303, { 'set-cookie': 'dsh-auth=launch-token; Path=/; HttpOnly', location: './' })
-        return res.end()
+        const respond = () => {
+          if (res.destroyed) return
+          res.writeHead(303, { 'set-cookie': 'dsh-auth=' + currentCookie + '; Path=/; HttpOnly', location: './' })
+          res.end()
+        }
+        if (delayExchangeMs) return setTimeout(respond, delayExchangeMs)
+        return respond()
+      }
+      if (req.url === '/hang-headers') return
+      if (req.url === '/hang-body') { res.writeHead(200); res.write('partial'); return }
+      if (req.url === '/stream') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        let count = 0
+        const timer = setInterval(() => { res.write('event\n'); if (++count === 5) { clearInterval(timer); res.end() } }, 50)
+        res.on('close', () => clearInterval(timer))
+        return
       }
       if (req.url === '/redirect') {
         res.writeHead(302, { location: 'http://127.0.0.1:' + port + '/target' })
@@ -32,6 +50,7 @@ function startUpstream({ hangExchanges = 0 } = {}) {
         return res.end()
       }
       if (req.url === '/api/sessions') {
+        if (req.headers.cookie !== 'dsh-auth=' + currentCookie) { res.writeHead(401); return res.end() }
         res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'upstream=1' })
         return res.end(JSON.stringify({
           ok: true,
@@ -43,9 +62,14 @@ function startUpstream({ hangExchanges = 0 } = {}) {
       res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'upstream=1' })
       res.end('<!doctype html><html><head><title>app</title></head><body>app</body></html>')
     })
-    server.on('upgrade', (req, socket) => {
+    server.on('upgrade', (req, socket, head) => {
       seen.push({ method: 'UPGRADE', url: req.url, headers: req.headers })
+      if (req.headers.cookie !== 'dsh-auth=' + currentCookie) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        return
+      }
       socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+      if (head.length) socket.write('echo:' + head.toString())
       socket.on('data', (chunk) => socket.write('echo:' + chunk.toString()))
       socket.on('error', () => socket.destroy())
     })
@@ -58,6 +82,8 @@ function startUpstream({ hangExchanges = 0 } = {}) {
       resolve({
         port,
         seen,
+        socketCount: () => sockets.size,
+        rotateCookie: () => { currentCookie = 'rotated-token' },
         close: () => new Promise((done) => {
           for (const socket of sockets) socket.destroy()
           server.close(done)
@@ -117,6 +143,14 @@ async function withGate(t, overrides = {}) {
     rmSync(dir, { recursive: true, force: true })
   })
   return { upstream, gate, dir }
+}
+
+async function waitFor(predicate, timeoutMs = 3000) {
+  const until = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= until) throw new Error('condition timed out')
+    await delay(20)
+  }
 }
 
 function setCookies(res) {
@@ -319,6 +353,63 @@ test('logout clears the cookie', async (t) => {
   assert.match(cookies[0], /Max-Age=0/)
 })
 
+test('logout revokes only that session, including across restart', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  const first = await startGate(upstream.port, dir)
+  let second
+  t.after(async () => { first.dispose(); second?.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const session1 = (await login(first.port)).cookie
+  const session2 = (await login(first.port)).cookie
+  assert.notEqual(session1, session2)
+  const logout = await request(first.port, '/__gate/logout', { headers: { cookie: session1 } })
+  assert.equal(logout.res.status, 302)
+  assert.equal((await request(first.port, '/api/sessions', { headers: { cookie: session1 } })).res.status, 401)
+  assert.equal((await request(first.port, '/api/sessions', { headers: { cookie: session2 } })).res.status, 200)
+  const saved = readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8')
+  assert.ok(!saved.includes(session1))
+  assert.equal(JSON.parse(saved).revokedSessions.length, 1)
+  first.dispose()
+  second = await startGate(upstream.port, dir)
+  assert.equal((await request(second.port, '/api/sessions', { headers: { cookie: session1 } })).res.status, 401)
+  assert.equal((await request(second.port, '/api/sessions', { headers: { cookie: session2 } })).res.status, 200)
+})
+
+test('alternate encodings of a revoked token cannot bypass logout', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const last = alphabet.indexOf(cookie.at(-1))
+  assert.equal(last % 4, 0)
+  const alternate = cookie.slice(0, -1) + alphabet[last + 1]
+  assert.equal(Buffer.from(alternate.split('.').at(-1), 'base64url').toString('hex'),
+    Buffer.from(cookie.split('.').at(-1), 'base64url').toString('hex'))
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  for (const candidate of [alternate, cookie + '=']) {
+    assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: candidate } })).res.status, 401)
+  }
+})
+
+test('logout closes the same session websocket', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const ws = await openWebSocket(gate.port, cookie)
+  assert.match(ws.text(), /HTTP\/1\.1 101/)
+  const closed = Promise.race([new Promise(resolve => ws.socket.once('close', () => resolve(true))), delay(2000).then(() => false)])
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  assert.equal(await closed, true)
+})
+
+test('logout reports failure if revocation cannot be persisted', async (t) => {
+  const { gate, dir } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  writeFileSync(join(dir, 'data', 'dsh-frontgate.json'), '{broken')
+  const result = await request(gate.port, '/__gate/logout', { headers: { cookie } })
+  assert.equal(result.res.status, 503)
+  assert.equal(result.cookies.length, 0)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+})
+
 test('tampered session cookies are rejected', async (t) => {
   const { gate } = await withGate(t)
   const { cookie } = await login(gate.port)
@@ -376,6 +467,59 @@ test('oversized login bodies are refused', async (t) => {
   assert.equal(res.status, 413)
 })
 
+test('oversized chunked login returns 413 before closing the connection', async (t) => {
+  const { gate } = await withGate(t)
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1', port: gate.port, path: '/__gate/login', method: 'POST',
+      headers: { origin: 'http://127.0.0.1:' + gate.port, 'transfer-encoding': 'chunked' },
+    }, res => { res.resume(); resolve(res.statusCode) })
+    req.on('error', reject)
+    req.end('password=' + 'x'.repeat(5000))
+  })
+  assert.equal(status, 413)
+})
+
+test('slow login bodies are limited per client without blocking health checks', async (t) => {
+  const { gate } = await withGate(t, { maxPendingLoginsPerIp: 2, maxConnectionsPerPeer: 16 })
+  const sockets = []
+  t.after(() => { for (const socket of sockets) socket.destroy() })
+  for (let i = 0; i < 2; i++) {
+    const socket = net.connect(gate.port, '127.0.0.1')
+    sockets.push(socket)
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+    socket.write(`POST /__gate/login HTTP/1.1\r\nHost: 127.0.0.1:${gate.port}\r\nOrigin: http://127.0.0.1:${gate.port}\r\nContent-Length: 1000\r\n\r\nx`)
+  }
+  await delay(100)
+  assert.equal((await login(gate.port)).res.status, 429)
+  assert.equal((await request(gate.port, '/__gate/health')).res.status, 200)
+  for (const socket of sockets) socket.destroy()
+  await delay(100)
+  assert.equal((await login(gate.port)).res.status, 303)
+})
+
+test('partial headers cannot exhaust all server connections from one peer', async (t) => {
+  const { gate } = await withGate(t, { maxConnectionsPerPeer: 2 })
+  const sockets = []
+  t.after(() => { for (const socket of sockets) socket.destroy() })
+  for (let i = 0; i < 2; i++) {
+    const socket = net.connect(gate.port, '127.0.0.1')
+    sockets.push(socket)
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject) })
+    socket.write('GET / HTTP/1.1\r\nHost: 127.0.0.1')
+  }
+  await delay(100)
+  const blocked = await new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port: gate.port, path: '/__gate/health', timeout: 1000 }, res => { res.resume(); resolve(res.statusCode) })
+    req.on('error', () => resolve('closed'))
+    req.on('timeout', () => { req.destroy(); resolve('timeout') })
+  })
+  assert.equal(blocked, 'closed')
+  sockets[0].destroy()
+  await delay(100)
+  assert.equal((await request(gate.port, '/__gate/health')).res.status, 200)
+})
+
 test('websocket upgrades require a session and are spliced through', async (t) => {
   const { gate } = await withGate(t)
   const anonymous = await openWebSocket(gate.port, '')
@@ -431,6 +575,39 @@ test('changing the password revokes old sessions', async (t) => {
   const fresh = await login(second.port, 'a-brand-new-password')
   assert.equal(fresh.res.status, 303)
   assert.ok(fresh.cookie)
+})
+
+test('stopping the gate closes upgrades and restoring an old password cannot revive sessions', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  const first = await startGate(upstream.port, dir)
+  let next
+  let restored
+  t.after(async () => { first.dispose(); next?.dispose(); restored?.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(first.port)
+  const ws = await openWebSocket(first.port, cookie)
+  assert.match(ws.text(), /HTTP\/1\.1 101/)
+  const closed = Promise.race([new Promise(resolve => ws.socket.once('close', () => resolve(true))), delay(2000).then(() => false)])
+  first.dispose()
+  assert.equal(await closed, true)
+  next = await startGate(upstream.port, dir, { passwordHash: hashPassword('another-test-password') })
+  assert.equal((await request(next.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+  next.dispose()
+  restored = await startGate(upstream.port, dir)
+  assert.equal((await request(restored.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+})
+
+test('a websocket closes when its signed session expires', async (t) => {
+  const { gate, dir } = await withGate(t)
+  const state = JSON.parse(readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8'))
+  const now = Math.floor(Date.now() / 1000)
+  const pv = createHash('sha256').update(HASH).digest('base64url').slice(0, 12)
+  const body = ['v1', now, now + 2, randomBytes(16).toString('base64url'), pv].join('.')
+  const cookie = 'dsh_gate=' + body + '.' + createHmac('sha256', state.secret).update(body).digest('base64url')
+  const ws = await openWebSocket(gate.port, cookie)
+  assert.match(ws.text(), /HTTP\/1\.1 101/)
+  const closed = Promise.race([new Promise(resolve => ws.socket.once('close', () => resolve(true))), delay(3500).then(() => false)])
+  assert.equal(await closed, true)
 })
 
 test('a generated password is printed once and remains valid after restart', async (t) => {
@@ -577,6 +754,154 @@ test('a timed-out harness exchange returns 503 and the next request retries', as
   assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 1)
   assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 200)
   assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 2)
+})
+
+test('closed clients do not create upstream requests after a delayed exchange', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ delayExchangeMs: 500 })
+  const gate = await startGate(upstream.port, dir)
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const requests = Array.from({ length: 4 }, () => {
+    const req = http.get({ host: '127.0.0.1', port: gate.port, path: '/api/sessions', headers: { cookie } })
+    req.on('error', () => {})
+    return req
+  })
+  const socket = net.connect(gate.port, '127.0.0.1')
+  socket.on('error', () => {})
+  await new Promise(resolve => socket.once('connect', resolve))
+  socket.write(`GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${gate.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nCookie: ${cookie}\r\n\r\n`)
+  await waitFor(() => upstream.seen.some(entry => entry.url.startsWith('/?token=')))
+  for (const req of requests) req.destroy()
+  socket.destroy()
+  await delay(650)
+  assert.deepEqual(upstream.seen.filter(entry => entry.url === '/api/sessions' || entry.method === 'UPGRADE').map(entry => [entry.method, entry.url]), [])
+  assert.ok(upstream.socketCount() <= 1)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+})
+
+test('websocket bytes sent during a delayed exchange reach the upstream', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ delayExchangeMs: 300 })
+  const gate = await startGate(upstream.port, dir)
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const socket = net.connect(gate.port, '127.0.0.1')
+  t.after(() => socket.destroy())
+  socket.on('error', () => {})
+  await new Promise(resolve => socket.once('connect', resolve))
+  let response = ''
+  socket.on('data', chunk => { response += chunk.toString() })
+  socket.write(`GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${gate.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nCookie: ${cookie}\r\n\r\n`)
+  await waitFor(() => upstream.seen.some(entry => entry.url.startsWith('/?token=')))
+  socket.write('early')
+  await waitFor(() => response.includes('echo:early'))
+  assert.match(response, /HTTP\/1\.1 101/)
+})
+
+test('logout while an exchange is pending prevents forwarding the old session', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ delayExchangeMs: 500 })
+  const gate = await startGate(upstream.port, dir)
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const pending = request(gate.port, '/api/sessions', { headers: { cookie }, signal: AbortSignal.timeout(3000) })
+  await waitFor(() => upstream.seen.some(entry => entry.url.startsWith('/?token=')))
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  assert.equal((await pending).res.status, 401)
+  assert.equal(upstream.seen.filter(entry => entry.url === '/api/sessions').length, 0)
+})
+
+test('upstream header and idle deadlines release stalled requests while streams remain active', async (t) => {
+  const { gate } = await withGate(t, { upstreamHeaderTimeoutMs: 180, upstreamIdleTimeoutMs: 180 })
+  const { cookie } = await login(gate.port)
+  const options = { headers: { cookie }, signal: AbortSignal.timeout(3000) }
+  assert.equal((await request(gate.port, '/hang-headers', options)).res.status, 504)
+  const stream = await request(gate.port, '/stream', options)
+  assert.equal(stream.res.status, 200)
+  assert.equal(stream.body, 'event\n'.repeat(5))
+  const stalled = await fetch('http://127.0.0.1:' + gate.port + '/hang-body', options)
+  assert.equal(stalled.status, 200)
+  await assert.rejects(stalled.text())
+  assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 200)
+})
+
+test('an upstream 401 refreshes the cached cookie on the next HTTP or websocket request', async (t) => {
+  const { gate, upstream } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  upstream.rotateCookie()
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  assert.equal(upstream.seen.filter(entry => entry.url.startsWith('/?token=')).length, 2)
+})
+
+test('an upstream websocket 401 also invalidates the cached cookie', async (t) => {
+  const { gate, upstream } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  upstream.rotateCookie()
+  const ws = await openWebSocket(gate.port, cookie)
+  assert.match(ws.text(), /HTTP\/1\.1 401/)
+  ws.socket.destroy()
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  assert.equal(upstream.seen.filter(entry => entry.url.startsWith('/?token=')).length, 2)
+})
+
+test('HTTPS upstream validates its certificate and hostname for HTTP and websockets', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-upstream-tls-'))
+  const certPath = join(dir, 'cert.pem')
+  const keyPath = join(dir, 'key.pem')
+  const cert = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
+    '-out', certPath, '-days', '1', '-subj', '/CN=upstream.test',
+    '-addext', 'subjectAltName=DNS:upstream.test',
+  ], { stdio: 'ignore' })
+  assert.equal(cert.status, 0, 'openssl is required for upstream TLS tests')
+  const sockets = new Set()
+  const upstream = https.createServer({ key: readFileSync(keyPath), cert: readFileSync(certPath) }, (req, res) => {
+    if (req.url.startsWith('/?token=')) {
+      res.writeHead(303, { 'set-cookie': 'dsh-auth=secure; Path=/' })
+      return res.end()
+    }
+    res.writeHead(req.headers.cookie === 'dsh-auth=secure' ? 200 : 401)
+    res.end('secure')
+  })
+  upstream.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
+  upstream.on('upgrade', (req, socket) => {
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
+    socket.on('error', () => socket.destroy())
+  })
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const gates = []
+  t.after(async () => {
+    for (const gate of gates) gate.stop()
+    for (const socket of sockets) socket.destroy()
+    await new Promise(resolve => upstream.close(resolve))
+    rmSync(dir, { recursive: true, force: true })
+  })
+  async function openGate(name, options) {
+    const made = makeCtx(upstream.address().port, join(dir, name))
+    made.ctx.webServer.getOrigin = () => `https://127.0.0.1:${upstream.address().port}`
+    const gate = apply(made.ctx, { listenPort: 0, passwordHash: HASH, ...options })
+    await gate.ready()
+    gates.push(gate)
+    return gate.address().port
+  }
+  for (const [name, options] of [
+    ['untrusted', { upstreamServerName: 'upstream.test' }],
+    ['wrong-name', { upstreamCaFile: certPath, upstreamServerName: 'wrong.test' }],
+  ]) {
+    const port = await openGate(name, options)
+    const { cookie } = await login(port)
+    assert.equal((await request(port, '/api/sessions', { headers: { cookie } })).res.status, 503)
+  }
+  const port = await openGate('trusted', { upstreamCaFile: certPath, upstreamServerName: 'upstream.test' })
+  const { cookie } = await login(port)
+  assert.equal((await request(port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  const ws = await openWebSocket(port, cookie)
+  assert.match(ws.text(), /HTTP\/1\.1 101/)
+  ws.socket.destroy()
 })
 
 test('a synchronous launch URL error does not permanently cache a failed exchange', async (t) => {

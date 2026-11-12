@@ -10,11 +10,20 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { hashPassword, validPasswordHash, verifyPasswordSync } from './auth.ts'
 
+/** Bound persistent logout revocations; expired entries are pruned on logout. */
+export const MAX_REVOKED_SESSIONS = 10000
+
+export interface RevokedSession {
+  digest: string
+  expires: number
+}
+
 /** Persisted state file contents. */
 export interface State {
   passwordHash?: string
   secret?: string
   createdAt?: string
+  revokedSessions?: RevokedSession[]
 }
 
 /** Read existing state without replacing malformed or inaccessible credentials. */
@@ -32,6 +41,13 @@ export function readState(path: string, mustExist = false): State {
     const state = value as State
     if (!validPasswordHash(state.passwordHash) || typeof state.secret !== 'string' || state.secret.length < 64) {
       throw new Error('invalid credentials')
+    }
+    if (state.revokedSessions !== undefined &&
+        (!Array.isArray(state.revokedSessions) || state.revokedSessions.length > MAX_REVOKED_SESSIONS ||
+         state.revokedSessions.some((entry) => !entry || typeof entry !== 'object' ||
+           typeof entry.digest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(entry.digest) ||
+           !Number.isSafeInteger(entry.expires) || entry.expires <= 0))) {
+      throw new Error('invalid revoked sessions')
     }
     return state
   } catch (err) {

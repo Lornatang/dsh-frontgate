@@ -61,6 +61,11 @@ its port must differ from the harness port.
 | `publicOrigin` | empty | External origin when a reverse proxy terminates HTTPS. |
 | `trustProxy` | `false` | Use client IPs supplied by a trusted proxy. |
 | `exchangeTimeoutMs` | `5000` | Harness token exchange timeout in milliseconds. |
+| `maxConnectionsPerPeer` | `64` | Simultaneous TCP connections per peer; `0` disables this limit. |
+| `maxPendingLoginsPerIp` | `4` | Incomplete login forms allowed per client IP. |
+| `upstreamHeaderTimeoutMs` | `60000` | Upstream response-header deadline, including queue time; `0` disables. |
+| `upstreamIdleTimeoutMs` | `300000` | Upstream response idle deadline; `0` disables. |
+| `upstreamCaFile` / `upstreamServerName` | empty | CA file and optional TLS hostname for a private HTTPS harness. |
 | `title` | `DeepSeek Harness` | Login page title. |
 
 Password precedence is configured hash, configured password,
@@ -73,13 +78,24 @@ correct passwords, until it expires; clients behind the same NAT may share it.
 For Docker, set `listenHost: '0.0.0.0'` and publish the gate port, for example:
 
 ```yaml
-ports:
-  - '30190:3090'
+# ~/.dsh/profiles/web/cordis.patch.yml
+- id: frontgate
+  config:
+    listenHost: '0.0.0.0'
+    listenPort: 30010
 ```
 
-Then open `http://<host-ip>:30190`. Keep the harness itself on loopback so it
-cannot bypass the gate. HTTP exposes passwords and cookies; use a trusted LAN,
-VPN, or HTTPS.
+```yaml
+# Docker Compose
+ports:
+  - '30190:30010'
+```
+
+Restart DSH after editing its profile, then open `http://<host-ip>:30190`. The
+container port in the mapping must equal `listenPort`; the external port can
+be different. Leave `publicOrigin` empty and `trustProxy` disabled for direct
+HTTP access. Keep the harness itself on loopback so it cannot bypass the gate.
+HTTP exposes passwords and cookies; use a trusted LAN, VPN, or HTTPS.
 
 Use a dedicated hostname or IP for the gate. Browser cookies are shared by
 all ports on the same hostname or IP, so an untrusted service on another port
@@ -91,6 +107,15 @@ any non-default port (Nginx: `proxy_set_header Host $http_host;`). Restrict
 direct access to the gate listener to the proxy. If `trustProxy` is enabled,
 the proxy must replace client-supplied `X-Forwarded-For` with the real client
 IP (Nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
+`maxConnectionsPerPeer` counts the TCP peer, so proxied connections share the
+proxy's limit. Adjust the limit for expected traffic and apply per-client limits
+at the proxy when appropriate.
+
+HTTPS harness certificates and hostnames are verified. For a private CA, set
+`upstreamCaFile` to its PEM file; if the harness origin is an IP but its
+certificate names a DNS host, also set `upstreamServerName` to that host.
+For a stream that may be silent for more than five minutes, raise or disable
+`upstreamIdleTimeoutMs`.
 
 ## Troubleshooting
 
@@ -98,7 +123,8 @@ IP (Nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
   reused. Set `password` and remove `passwordHash` to change it; this signs out
   existing sessions.
 - **Cannot connect:** Check `listenHost`, the gate's startup log and the Docker
-  port mapping. To sign out, visit `/__gate/logout`.
+  port mapping. The gate port must match the container side of the mapping.
+  To sign out, visit `/__gate/logout`.
 - **Origin or host check fails:** Verify `publicOrigin` and the proxy's `Host`.
 - **State file error:** Restore a trusted backup and ensure the file is owned
   by the DSH user with mode `0600`. If no backup exists, stop DSH and move the
@@ -106,7 +132,9 @@ IP (Nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
 
 The state file is `~/.dsh/profiles/<name>/data/dsh-frontgate.json`. Keep it and
 its parent directories accessible only to trusted users. On Windows, use ACLs
-to restrict access.
+to restrict access. Sign-out revocations persist across restarts; each profile
+must have only one running gate instance. Expired revocations are removed on
+sign-out, and a full or unwritable revocation store makes sign-out fail safely.
 
 ## Development
 

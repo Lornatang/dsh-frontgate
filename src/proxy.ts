@@ -40,6 +40,10 @@ export interface ProxyOptions {
   trustProxy: boolean
   /** Maximum time spent exchanging a launch token, including connection time. */
   exchangeTimeoutMs: number
+  upstreamHeaderTimeoutMs: number
+  upstreamIdleTimeoutMs: number
+  upstreamCa?: Buffer
+  upstreamServerName: string
   /** Absolute entry URL with the harness launch token attached. */
   authenticatedUrl(baseUrl: string): string
   log: LogSink
@@ -63,12 +67,16 @@ function sendUpstreamError(res: ServerResponse): void {
 
 /** Build the proxy for one harness origin. */
 export function createProxy(options: ProxyOptions): Proxy {
-  const { targetOrigin, publicProto, trustProxy, exchangeTimeoutMs, authenticatedUrl, log } = options
+  const { targetOrigin, publicProto, trustProxy, exchangeTimeoutMs, upstreamHeaderTimeoutMs,
+    upstreamIdleTimeoutMs, upstreamCa, upstreamServerName, authenticatedUrl, log } = options
   const target = new URL(targetOrigin)
   const secureUpstream = target.protocol === 'https:'
   const transport = secureUpstream ? https : http
   const AgentClass = secureUpstream ? https.Agent : http.Agent
   const upstreamAgent = new AgentClass({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 })
+  const tlsOptions = secureUpstream
+    ? { ...(upstreamCa ? { ca: upstreamCa } : {}), ...(upstreamServerName ? { servername: upstreamServerName } : {}) }
+    : {}
   const exchanges = new Set<http.ClientRequest>()
 
   /** One GET / with the launch token; the response carries the harness cookie. */
@@ -90,7 +98,7 @@ export function createProxy(options: ProxyOptions): Proxy {
         path: url.pathname + url.search,
         method: 'GET',
         headers: { host: target.host, accept: 'text/html' },
-        ...(secureUpstream ? { rejectUnauthorized: false } : {}),
+        ...tlsOptions,
       }, (res) => {
         res.resume()
         const lines = res.headers['set-cookie'] || []
@@ -108,6 +116,10 @@ export function createProxy(options: ProxyOptions): Proxy {
   // Harness launch cookie, exchanged server-side; the browser never sees it.
   let harnessCache = { value: '', at: 0 }
   let harnessInflight: Promise<string> | null = null
+
+  function invalidateHarnessCookie(cookie: string): void {
+    if (harnessCache.value === cookie) harnessCache = { value: '', at: 0 }
+  }
 
   function harnessCookie(): Promise<string> {
     if (harnessCache.value && Date.now() - harnessCache.at < HARNESS_COOKIE_TTL) return Promise.resolve(harnessCache.value)
@@ -152,6 +164,15 @@ export function createProxy(options: ProxyOptions): Proxy {
 
   function forward(req: IncomingMessage, res: ServerResponse, cookie: string): void {
     const started = Date.now()
+    let headerTimer: NodeJS.Timeout | undefined
+    let idleTimer: NodeJS.Timeout | undefined
+    let timedOut = false
+    const clearTimers = (): void => {
+      if (headerTimer) clearTimeout(headerTimer)
+      if (idleTimer) clearTimeout(idleTimer)
+      headerTimer = undefined
+      idleTimer = undefined
+    }
     const proxyReq = transport.request({
       agent: upstreamAgent,
       host: connectHost(target.hostname),
@@ -159,8 +180,11 @@ export function createProxy(options: ProxyOptions): Proxy {
       method: req.method,
       path: req.url,
       headers: upstreamHeaders(req, cookie),
-      ...(secureUpstream ? { rejectUnauthorized: false } : {}),
+      ...tlsOptions,
     }, (proxyRes) => {
+      if (headerTimer) clearTimeout(headerTimer)
+      headerTimer = undefined
+      if (res.destroyed) { proxyRes.destroy(); return }
       const headers: OutgoingHttpHeaders = {}
       for (const [key, value] of Object.entries(proxyRes.headers)) {
         if (!RESPONSE_DROP.has(key)) headers[key] = value
@@ -168,19 +192,42 @@ export function createProxy(options: ProxyOptions): Proxy {
       const location = proxyRes.headers['location']
       if (location !== undefined) headers.location = rewriteLocation(location)
       const status = proxyRes.statusCode || 502
+      if (status === 401) invalidateHarnessCookie(cookie)
       res.writeHead(status, headers)
+      const armIdle = (): void => {
+        if (idleTimer) clearTimeout(idleTimer)
+        if (!upstreamIdleTimeoutMs) return
+        idleTimer = setTimeout(() => {
+          if (proxyRes.isPaused() || res.writableNeedDrain) { armIdle(); return }
+          timedOut = true
+          proxyRes.destroy(new Error('upstream response idle timeout'))
+        }, upstreamIdleTimeoutMs)
+      }
+      proxyRes.on('data', armIdle)
+      proxyRes.once('end', clearTimers)
+      res.on('drain', armIdle)
+      armIdle()
       proxyRes.pipe(res)
-      proxyRes.on('error', () => res.destroy())
+      proxyRes.on('error', () => { clearTimers(); res.destroy() })
       const elapsed = Date.now() - started
       if (status >= 400 || elapsed > 1000) {
         log.info(req.method + ' ' + String(req.url || '/').split('?')[0] + ' ' + status + ' ' + elapsed + 'ms')
       }
     })
+    if (upstreamHeaderTimeoutMs) {
+      headerTimer = setTimeout(() => {
+        timedOut = true
+        proxyReq.destroy(new Error('upstream response headers timeout'))
+      }, upstreamHeaderTimeoutMs)
+    }
     proxyReq.on('error', (err: Error) => {
+      clearTimers()
+      if (res.destroyed) return
       log.warn('upstream error: ' + err.message)
+      if (timedOut && !res.headersSent) return text(res, 504, 'dsh-frontgate: upstream timeout\n')
       sendUpstreamError(res)
     })
-    res.on('close', () => proxyReq.destroy())
+    res.on('close', () => { clearTimers(); proxyReq.destroy() })
     req.pipe(proxyReq)
   }
 
@@ -206,7 +253,7 @@ export function createProxy(options: ProxyOptions): Proxy {
     lines.push('', '')
     const payload = lines.join('\r\n')
 
-    const backend = secureUpstream ? tls.connect({ host, port, rejectUnauthorized: false }) : net.connect(port, host)
+    const backend = secureUpstream ? tls.connect({ host, port, ...tlsOptions }) : net.connect(port, host)
     let closed = false
     const teardown = (message?: string): void => {
       if (closed) return
@@ -217,6 +264,19 @@ export function createProxy(options: ProxyOptions): Proxy {
     }
     const start = (): void => {
       backend.setTimeout(0)
+      let statusLine = ''
+      let statusRead = false
+      backend.on('data', (chunk: Buffer) => {
+        if (statusRead) return
+        statusLine += chunk.toString('latin1', 0, Math.max(0, 256 - statusLine.length))
+        const end = statusLine.indexOf('\r\n')
+        if (end !== -1 || statusLine.length >= 256) {
+          statusRead = true
+          if (/^HTTP\/1\.[01] 401(?:\s|$)/.test(statusLine.slice(0, end === -1 ? undefined : end))) {
+            invalidateHarnessCookie(cookie)
+          }
+        }
+      })
       backend.write(payload)
       if (head && head.length) backend.write(head)
       backend.pipe(socket)

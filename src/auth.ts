@@ -1,8 +1,8 @@
 /**
  * Passwords, session tokens and the cookie that carries them.
  *
- * Sessions are stateless HMAC tokens bound to the current password hash, so a
- * password change invalidates every session without a session table.
+ * Sessions are HMAC tokens bound to the current password hash. Revocation is
+ * tracked separately by the session store.
  */
 import { createHash, createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
 
@@ -136,6 +136,9 @@ export function verifyToken(secret: string, pv: string, token: string | undefine
   if (parts.length !== 6) return false
   const [version, iat, exp, nonce, tokenPv, mac] = parts
   if (version !== TOKEN_VERSION || tokenPv !== pv) return false
+  // A token must have exactly one representation: otherwise a different
+  // base64 encoding of the same MAC could evade its revocation digest.
+  if (!/^[A-Za-z0-9_-]{22}$/.test(nonce!) || !/^[A-Za-z0-9_-]{43}$/.test(mac!)) return false
   const now = Math.floor(Date.now() / 1000)
   const issued = Number(iat)
   const expires = Number(exp)
@@ -149,7 +152,7 @@ export function verifyToken(secret: string, pv: string, token: string | undefine
   } catch {
     return false
   }
-  return got.length === want.length && timingSafeEqual(got, want)
+  return got.length === want.length && got.toString('base64url') === mac && timingSafeEqual(got, want)
 }
 
 /** Session cookie attributes; Secure follows the browser-facing protocol. */

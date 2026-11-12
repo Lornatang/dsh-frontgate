@@ -33,6 +33,18 @@ export interface Config {
     lockMinutes: number;
     /** Maximum time to exchange the harness launch token, in milliseconds. */
     exchangeTimeoutMs: number;
+    /** Maximum simultaneous TCP connections from one peer; 0 disables this limit. */
+    maxConnectionsPerPeer: number;
+    /** Maximum login forms being received from one client IP. */
+    maxPendingLoginsPerIp: number;
+    /** Deadline for upstream response headers, including time queued for a socket; 0 disables. */
+    upstreamHeaderTimeoutMs: number;
+    /** Maximum idle time after upstream response headers; 0 disables. */
+    upstreamIdleTimeoutMs: number;
+    /** Optional CA certificate for a private HTTPS harness. */
+    upstreamCaFile: string;
+    /** Optional TLS identity when connecting to an HTTPS harness by IP. */
+    upstreamServerName: string;
 }
 /** Defaults applied by the loader and by direct calls to apply(). */
 export declare const DEFAULTS: Config;

@@ -7,7 +7,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
-  COOKIE, clearCookie, passwordVersion, sessionCookie, signToken, verifyPassword, verifyToken,
+  COOKIE, clearCookie, sessionCookie, signToken, verifyPassword,
 } from './auth.ts'
 import {
   MAX_FORM, clientIp, cookieValue, hostMatchesPublicOrigin, html, json, readForm, redirect, safeNext,
@@ -29,6 +29,7 @@ export interface GateRuntime {
   pv: string
   sessionSeconds: number
   maxAttempts: number
+  maxPendingLoginsPerIp: number
   lockMs: number
   trustProxy: boolean
   useTls: boolean
@@ -40,6 +41,8 @@ export interface GateRuntime {
 export interface GateOptions {
   runtime: GateRuntime
   harnessCookie(): Promise<string>
+  validSession(token: string): boolean
+  revokeSession(token: string): boolean
   forward(req: IncomingMessage, res: ServerResponse, cookie: string): void
   log: LogSink
 }
@@ -51,12 +54,13 @@ interface Failure {
 
 /** Build the request handler for one gate instance. */
 export function createHandler(options: GateOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const { runtime, harnessCookie, forward, log } = options
-  const { title, passwordHash, secret, pv, sessionSeconds, maxAttempts, lockMs, trustProxy, useTls, publicOrigin, secureCookie } = runtime
+  const { runtime, harnessCookie, validSession, revokeSession, forward, log } = options
+  const { title, passwordHash, secret, pv, sessionSeconds, maxAttempts, maxPendingLoginsPerIp, lockMs, trustProxy, useTls, publicOrigin, secureCookie } = runtime
 
   // Login throttling: per-client lockout plus a global scrypt slot limit.
   const failures = new Map<string, Failure>()
   const clientsInFlight = new Set<string>()
+  const pendingForms = new Map<string, number>()
   let checksInFlight = 0
 
   function lockRemaining(ip: string): number {
@@ -86,27 +90,46 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
 
   function sessionOf(req: IncomingMessage): boolean {
     const token = cookieValue(req.headers.cookie, COOKIE)
-    return Boolean(token) && verifyToken(secret, pv, token)
+    return Boolean(token) && validSession(token)
   }
 
   async function handleLogin(req: IncomingMessage, res: ServerResponse, search: string): Promise<void> {
     const next = safeNext(new URLSearchParams(search).get('next') || '/')
     if (req.method === 'POST') {
-      if (!sameOrigin(req, publicOrigin, useTls)) return html(res, 403, loginPage(title, next, 'Origin check failed.'))
+      if (!sameOrigin(req, publicOrigin, useTls)) {
+        req.resume()
+        res.setHeader('connection', 'close')
+        return html(res, 403, loginPage(title, next, 'Origin check failed.'))
+      }
       const declared = Number(req.headers['content-length'] || 0)
-      if (declared > MAX_FORM) return text(res, 413, 'request body too large\n')
+      if (declared > MAX_FORM) {
+        req.resume()
+        return text(res, 413, 'request body too large\n', { connection: 'close' })
+      }
       const ip = clientIp(req, trustProxy)
       const wait = lockRemaining(ip)
       if (wait > 0) {
         req.resume()
-        return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
+        return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)), connection: 'close' })
       }
+      const pending = pendingForms.get(ip) ?? 0
+      if (pending >= maxPendingLoginsPerIp) {
+        req.resume()
+        return text(res, 429, 'too many pending logins\n', { 'retry-after': '1', connection: 'close' })
+      }
+      pendingForms.set(ip, pending + 1)
       let form: string
       try {
         form = await readForm(req)
       } catch (err) {
-        if ((err as Error).message === 'too large') return text(res, 413, 'request body too large\n')
-        return text(res, 400, 'bad request\n')
+        if (res.destroyed) return
+        if ((err as Error).message === 'too large') return text(res, 413, 'request body too large\n', { connection: 'close' })
+        if ((err as Error).message === 'timeout') return text(res, 408, 'request timeout\n', { connection: 'close' })
+        return text(res, 400, 'bad request\n', { connection: 'close' })
+      } finally {
+        const count = pendingForms.get(ip) ?? 1
+        if (count <= 1) pendingForms.delete(ip)
+        else pendingForms.set(ip, count - 1)
       }
       const remaining = lockRemaining(ip)
       if (remaining > 0) return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(remaining / 1000)) })
@@ -152,17 +175,26 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
     if (path === '/__gate/login') return handleLogin(req, res, search)
     if (path === '/__gate/logout') {
       if (!sameOrigin(req, publicOrigin, useTls)) return text(res, 403, 'forbidden\n')
+      const token = cookieValue(req.headers.cookie, COOKIE)
+      if (token && validSession(token)) {
+        try { revokeSession(token) } catch (err) {
+          log.warn('could not revoke session: ' + (err as Error).message)
+          return text(res, 503, 'could not sign out; retry later\n')
+        }
+      }
       res.setHeader('set-cookie', clearCookie(secureCookie))
       return redirect(res, '/__gate/login')
     }
     if (path.startsWith('/__gate/')) return text(res, 404, 'not found\n')
 
-    if (!sessionOf(req)) {
+    const token = cookieValue(req.headers.cookie, COOKIE)
+    const unauthorized = (): void => {
       if (path === '/api' || path.startsWith('/api/')) {
         return json(res, 401, { error: 'unauthorized', login: '/__gate/login' })
       }
       return redirect(res, '/__gate/login?next=' + encodeURIComponent(raw))
     }
+    if (!token || !validSession(token)) return unauthorized()
 
     if (!sameOrigin(req, publicOrigin, useTls)) {
       log.warn('cross-origin request blocked: ' + String(req.method) + ' ' + path)
@@ -174,9 +206,12 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
     try {
       cookie = await harnessCookie()
     } catch (err) {
+      if (res.destroyed) return
       log.warn('harness cookie exchange failed: ' + (err as Error).message)
       return json(res, 503, { error: 'harness_unavailable' })
     }
+    if (req.aborted || res.destroyed || !res.writable) return
+    if (!validSession(token)) return unauthorized()
     forward(req, res, cookie)
   }
 }

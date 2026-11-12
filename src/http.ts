@@ -157,13 +157,14 @@ export function readForm(req: IncomingMessage): Promise<string> {
     }
     const timer = setTimeout(() => {
       fail(new Error('timeout'))
-      req.destroy()
+      req.resume()
     }, FORM_TIMEOUT)
     req.on('data', (chunk: Buffer) => {
+      if (settled) return
       size += chunk.length
       if (size > MAX_FORM) {
         fail(new Error('too large'))
-        req.destroy()
+        req.resume()
         return
       }
       chunks.push(chunk)

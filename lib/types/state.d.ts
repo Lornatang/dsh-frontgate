@@ -1,8 +1,15 @@
+/** Bound persistent logout revocations; expired entries are pruned on logout. */
+export declare const MAX_REVOKED_SESSIONS = 10000;
+export interface RevokedSession {
+    digest: string;
+    expires: number;
+}
 /** Persisted state file contents. */
 export interface State {
     passwordHash?: string;
     secret?: string;
     createdAt?: string;
+    revokedSessions?: RevokedSession[];
 }
 /** Read existing state without replacing malformed or inaccessible credentials. */
 export declare function readState(path: string, mustExist?: boolean): State;

@@ -159,6 +159,35 @@ test('browser login succeeds and cross-port form and WebSocket attacks are refus
   assert.equal(upstream.upgradeReceived(), false)
 })
 
+test('browser login succeeds when the external and listener ports differ', browserOptions, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-port-'))
+  const upstream = makeUpstream()
+  await listen(upstream.server)
+  const gate = startGate(dir, upstream.server, { listenHost: '0.0.0.0' })
+  await gate.ready()
+  const proxy = http.createServer((req, res) => {
+    const target = http.request({ host: '127.0.0.1', port: gate.address().port, path: req.url, method: req.method, headers: req.headers }, response => {
+      res.writeHead(response.statusCode, response.headers)
+      response.pipe(res)
+    })
+    target.on('error', () => res.destroy())
+    req.pipe(target)
+  })
+  await listen(proxy)
+  let browser
+  t.after(async () => {
+    await browser?.close()
+    gate.stop()
+    await close(proxy)
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+  })
+  browser = await startBrowser(dir)
+  await browser.navigate(`http://127.0.0.1:${proxy.address().port}/__gate/login`)
+  await browser.submit(`document.querySelector('input[name="password"]').value=${JSON.stringify(password)}; document.querySelector('form').requestSubmit()`)
+  assert.match(await browser.evaluate('document.body.innerText'), /Signed in/)
+})
+
 test('HTTPS-terminating proxy issues a Secure cookie that is not sent over HTTP', browserOptions, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-tls-'))
   const cert = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'), '-days', '1', '-subj', '/CN=gate.test'], { stdio: 'ignore' })

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Persist session revocations on sign-out, reject alternate token encodings,
+  and close WebSockets on sign-out, expiry, or shutdown.
+- Bound per-peer connections and incomplete logins; cancel disconnected clients
+  and time out stalled upstream HTTP responses without cutting off active streams.
+- Verify HTTPS harness certificates, refresh stale harness cookies after a 401,
+  and return an HTTP error for oversized chunked login forms.
+- Document Docker port mapping and add security, browser and proxy regression tests.
+
 ## 0.1.1 - 2026-11-12
 
 - Publish as `@lornatang/dsh-frontgate`; install with `dsh plugin` using the
