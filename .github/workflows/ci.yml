@@ -42,7 +42,11 @@ jobs:
           node-version: '24'
       - run: npm ci --no-audit --no-fund
       - run: npm run build
-      - run: npm install --prefix "$RUNNER_TEMP/frontgate-dsh" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.2 pnpm@12.16.1
+      # pnpm 12 needs its install script to replace its bootstrap shim with the
+      # native executable used by DSH's direct process spawn.
+      - run: npm install --prefix "$RUNNER_TEMP/frontgate-pnpm" --no-audit --no-fund pnpm@12.16.1
+      - run: echo "$RUNNER_TEMP/frontgate-pnpm/node_modules/.bin" >> "$GITHUB_PATH"
+      - run: npm install --prefix "$RUNNER_TEMP/frontgate-dsh" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.2
       - run: npm run test:dsh
         env:
           DSH_TEST_INSTALL_DIR: ${{ runner.temp }}/frontgate-dsh
