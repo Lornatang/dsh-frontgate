@@ -24,6 +24,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci --no-audit --no-fund
+      - run: bash -n install.sh
       - run: npm run typecheck
       - run: npm test
       - run: git diff --exit-code -- lib

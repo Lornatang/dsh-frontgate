@@ -11,10 +11,12 @@ profile with the Web app.
 1. Install into the `web` profile:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash
+   dsh plugin --profile web add https://codeload.github.com/Lornatang/dsh-frontgate/tar.gz/refs/tags/v0.1.1
    ```
 
-   For another profile, add `-s -- --profile <name>` after `bash`.
+   DSH creates the `web` profile if necessary. For an existing profile that
+   already includes the Web app, replace `web` with its name. From a checkout,
+   `./install.sh --profile <name>` can also create a new custom Web profile.
 
 2. Restart the profile if it is already running. Otherwise, start it with:
 
@@ -39,18 +41,16 @@ profile with the Web app.
 
 ## Update
 
-Run the same install command for the same profile, then restart DSH. Existing
-configuration and the saved password remain in place; the password is not
-printed again. With `git` and GitHub access, the installer resolves the release
-tag to its current commit instead of using a cached archive.
-The installer follows the `v0.1.0` release tag; changes listed as Unreleased
-in the changelog are not included until a release is published.
+Run the install command for the desired release and profile, then restart DSH.
+Existing configuration and the saved password remain in place; the password is
+not printed again. Each release uses its own tag, so the URL changes when the
+version changes. Do not replace a published release tag.
 
 For offline installation, run `npm ci` and `npm pack` in a checkout on a
 connected machine, copy the resulting tarball to the DSH host, and run:
 
 ```bash
-dsh plugin --profile web add /path/to/dsh-frontgate-0.1.0.tgz
+dsh plugin --profile web add /path/to/dsh-frontgate-0.1.1.tgz
 ```
 
 Restart the profile after installing.
