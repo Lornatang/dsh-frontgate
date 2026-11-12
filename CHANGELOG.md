@@ -2,8 +2,8 @@
 
 ## 0.1.1 - 2026-11-12
 
-- Install the versioned GitHub archive directly with `dsh plugin`; keep
-  `install.sh` as a compatibility wrapper for existing and custom profiles.
+- Publish as `@lornatang/dsh-frontgate`; install with `dsh plugin` using the
+  npm package name. Document migration from the previous unscoped package.
 - Compare the full browser-facing origin, including scheme and port, for login,
   authenticated requests and WebSockets. Configure `publicOrigin` when HTTPS
   is terminated by a reverse proxy; it also enables Secure session cookies.

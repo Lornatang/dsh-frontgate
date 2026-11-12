@@ -6,8 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const root = new URL('..', import.meta.url)
-const version = JSON.parse(readFileSync(new URL('package.json', root), 'utf8')).version
-const archive = 'https://codeload.github.com/Lornatang/dsh-frontgate/tar.gz/refs/tags/v' + version
+const manifest = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'))
+const packageRef = manifest.name + '@' + manifest.version
+
+test('the DSH bundle loads the published package name', () => {
+  const patch = readFileSync(new URL('cordis.patch.yml', root), 'utf8')
+  assert.ok(patch.includes("name: '" + manifest.name + "'"))
+  assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
+})
 
 function installer(t) {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-install-'))
@@ -29,8 +35,8 @@ function installer(t) {
     const pkg = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } },
     }
-    if (args[0] === 'plugin' && !pkg.dsh.profile.bundles.includes('dsh-frontgate')) {
-      pkg.dsh.profile.bundles.push('dsh-frontgate')
+    if (args[0] === 'plugin' && !pkg.dsh.profile.bundles.includes('@lornatang/dsh-frontgate')) {
+      pkg.dsh.profile.bundles.push('@lornatang/dsh-frontgate')
     }
     fs.writeFileSync(file, JSON.stringify(pkg))
   `, { mode: 0o755 })
@@ -56,10 +62,10 @@ test('default install and update use the package version and preserve state', (t
   assert.equal(second.status, 0, second.stderr)
   assert.equal(readFileSync(state, 'utf8'), 'existing state')
   assert.deepEqual(setup.calls(), [
-    ['plugin', '--profile', 'web', 'add', archive],
-    ['plugin', '--profile', 'web', 'add', archive],
+    ['plugin', '--profile', 'web', 'add', packageRef],
+    ['plugin', '--profile', 'web', 'add', packageRef],
   ])
-  assert.match(readFileSync(new URL('README.md', root), 'utf8'), new RegExp('refs/tags/v' + version.replaceAll('.', '\\.')))
+  assert.ok(readFileSync(new URL('README.md', root), 'utf8').includes('add ' + manifest.name))
 })
 
 test('a new custom profile is initialized from the web template once', (t) => {
@@ -68,8 +74,8 @@ test('a new custom profile is initialized from the web template once', (t) => {
   assert.equal(setup.run([], { DSH_FRONTGATE_PROFILE: 'my-web' }).status, 0)
   assert.deepEqual(setup.calls(), [
     ['my-web', '--from-default-profile', 'web', '--help'],
-    ['plugin', '--profile', 'my-web', 'add', archive],
-    ['plugin', '--profile', 'my-web', 'add', archive],
+    ['plugin', '--profile', 'my-web', 'add', packageRef],
+    ['plugin', '--profile', 'my-web', 'add', packageRef],
   ])
 })
 
@@ -83,6 +89,19 @@ test('an incomplete custom profile is not replaced', (t) => {
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /exists without package.json/)
   assert.equal(readFileSync(patch, 'utf8'), 'existing configuration')
+})
+
+test('legacy packages are not silently installed alongside the scoped package', (t) => {
+  const setup = installer(t)
+  const profile = join(setup.dshHome, 'profiles', 'web')
+  mkdirSync(profile, { recursive: true })
+  const file = join(profile, 'package.json')
+  const original = JSON.stringify({ dependencies: { 'dsh-frontgate': '0.1.1' } })
+  writeFileSync(file, original)
+  const result = setup.run()
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /legacy dsh-frontgate detected/)
+  assert.equal(readFileSync(file, 'utf8'), original)
 })
 
 test('installer returns failure when DSH cannot install the archive', (t) => {

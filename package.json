@@ -1,5 +1,5 @@
 {
-  "name": "dsh-frontgate",
+  "name": "@lornatang/dsh-frontgate",
   "version": "0.1.1",
   "description": "Password gate and reverse proxy for the DeepSeek Harness Web UI: scrypt login, signed session cookie, Host and Origin rewrite, launch-token exchange, WebSocket pass-through.",
   "type": "module",
