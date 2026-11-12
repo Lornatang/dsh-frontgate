@@ -2,7 +2,7 @@
 # Compatibility wrapper for DSH's built-in plugin installer.
 set -euo pipefail
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 PACKAGE="@lornatang/dsh-frontgate"
 PROFILE="${DSH_FRONTGATE_PROFILE:-web}"
 

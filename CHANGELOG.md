@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 - 2026-11-12
 
 - Close rejected upgrade sockets, bound WebSocket handshakes and prevent one
   session or a saturated upstream pool from leaving HTTP requests queued forever.
