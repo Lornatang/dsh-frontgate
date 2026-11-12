@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 - 2026-11-12
 
 - Persist session revocations on sign-out, reject alternate token encodings,
   and close WebSockets on sign-out, expiry, or shutdown.
