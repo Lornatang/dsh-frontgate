@@ -63,8 +63,10 @@ its port must differ from the harness port.
 | `exchangeTimeoutMs` | `5000` | Harness token exchange timeout in milliseconds. |
 | `maxConnectionsPerPeer` | `64` | Simultaneous TCP connections per peer; `0` disables this limit. |
 | `maxPendingLoginsPerIp` | `4` | Incomplete login forms allowed per client IP. |
+| `maxHttpRequestsPerSession` | `32` | Simultaneous HTTP requests per signed-in session, including requests waiting for the harness. |
 | `upstreamHeaderTimeoutMs` | `0` | Upstream response-header deadline, including queue time; `0` disables. |
 | `upstreamIdleTimeoutMs` | `0` | Upstream response idle deadline; `0` disables. |
+| `websocketHandshakeTimeoutMs` | `10000` | Deadline for the upstream WebSocket handshake in milliseconds. |
 | `upstreamCaFile` / `upstreamServerName` | empty | CA file and optional TLS hostname for a private HTTPS harness. |
 | `title` | `DeepSeek Harness` | Login page title. |
 
@@ -72,6 +74,9 @@ Password precedence is configured hash, configured password,
 `DSH_FRONTGATE_PASSWORD_HASH`, `DSH_FRONTGATE_PASSWORD`, saved hash, then a
 newly generated password. Lockout blocks all attempts from the IP, including
 correct passwords, until it expires; clients behind the same NAT may share it.
+Incomplete failure counts expire after the lockout window. The gate remembers
+up to 1,024 clients with recent failures; when this store is full, new clients
+must wait for an entry to expire instead of displacing an active lockout.
 
 ## Remote access
 
@@ -117,13 +122,26 @@ certificate names a DNS host, also set `upstreamServerName` to that host.
 Upstream HTTP response deadlines are disabled by default so long or quiet
 Agent sessions can continue. Previously configured nonzero deadlines still
 apply. Set appropriate timeouts if you need to limit stalled requests, and
-check any reverse proxy's own timeouts as well.
+check any reverse proxy's own timeouts as well. The separate WebSocket handshake
+deadline applies until the upgrade succeeds; an established WebSocket is not
+subject to it. If `upstreamHeaderTimeoutMs` is also set, the shorter deadline
+applies to the handshake.
+
+The gate admits at most 128 simultaneous upstream HTTP requests. When that
+limit is reached, new requests receive 503 and may be retried; requests over
+the per-session limit receive 429. Long-running streams count toward these
+limits until they close.
 
 Signing out or reaching the configured session expiry closes that session's
 HTTP streams and WebSockets. Other sessions stay connected. Whether a
 disconnected request stops its underlying work depends on DSH and its plugins;
 allow important work to finish before signing out, changing the password, or
 restarting DSH.
+
+Authenticated HTTP responses use `Cache-Control: private, no-store`. Sign-out
+also asks the browser to clear older cached content using `Clear-Site-Data`.
+Browsers may ignore that request on non-local plaintext HTTP origins; clear the
+browser cache manually there if protected content was cached before upgrading.
 
 ## Troubleshooting
 

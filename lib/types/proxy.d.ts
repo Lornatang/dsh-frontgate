@@ -13,6 +13,7 @@ export interface ProxyOptions {
     exchangeTimeoutMs: number;
     upstreamHeaderTimeoutMs: number;
     upstreamIdleTimeoutMs: number;
+    websocketHandshakeTimeoutMs: number;
     upstreamCa?: Buffer;
     upstreamServerName: string;
     /** Absolute entry URL with the harness launch token attached. */

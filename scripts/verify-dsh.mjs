@@ -67,6 +67,14 @@ try {
   assert.equal(page.status, 200)
   assert.match(await page.text(), /<html/i)
   assert.equal(page.headers.getSetCookie().length, 0)
+  const filePath = join(temp, 'frontgate-cache-check.txt')
+  writeFileSync(filePath, 'frontgate integration data')
+  const file = await fetch(origin + '/api/file?path=' + encodeURIComponent(filePath), {
+    headers: { cookie }, signal: AbortSignal.timeout(10000),
+  })
+  assert.equal(file.status, 200)
+  assert.equal(file.headers.get('cache-control'), 'private, no-store')
+  assert.equal(await file.text(), 'frontgate integration data')
   const websocket = await new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: '/api/remote.mux', timeout: 10000, headers: {
       origin, cookie, connection: 'Upgrade', upgrade: 'websocket',
@@ -86,7 +94,14 @@ try {
     await delay(5000)
     assert.equal(websocket.socket.destroyed, false, 'DSH websocket closed during idle observation')
   } finally { websocket.socket.destroy() }
-  process.stdout.write('DSH 0.2.2-rc.2 login, page and idle WebSocket checks passed.\n')
+  const logout = await fetch(origin + '/__gate/logout', {
+    headers: { cookie }, redirect: 'manual', signal: AbortSignal.timeout(10000),
+  })
+  assert.equal(logout.status, 302)
+  assert.equal(logout.headers.get('clear-site-data'), '"cache"')
+  const revokedFile = await fetch(file.url, { headers: { cookie }, signal: AbortSignal.timeout(10000) })
+  assert.equal(revokedFile.status, 401)
+  process.stdout.write('DSH 0.2.2-rc.2 login, file cache, logout and idle WebSocket checks passed.\n')
 } catch (error) {
   // Never print the launch URL or generated credentials on a failed run.
   const safe = output.split('\n').filter((line) => line.startsWith('[dsh-frontgate]') && !line.includes('PASSWORD:'))

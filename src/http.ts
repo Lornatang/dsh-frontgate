@@ -4,7 +4,9 @@
  * Everything here is deliberately small: bounded body reads, one origin check,
  * one redirect sanitizer and one set of gate headers.
  */
+import { STATUS_CODES } from 'node:http'
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 
 /** Largest accepted login form body. */
 export const MAX_FORM = 4 * 1024
@@ -136,6 +138,19 @@ export const text = (
 
 export const redirect = (res: ServerResponse, location: string, status = 302): void =>
   send(res, status, { ...GATE_HEADERS, location }, '')
+
+/** Flush a rejected upgrade, then close even if the peer keeps its write side open. */
+export function rejectUpgrade(socket: Duplex, status: number): void {
+  if (socket.destroyed) return
+  const timer = setTimeout(() => socket.destroy(), 1000)
+  timer.unref()
+  socket.once('close', () => clearTimeout(timer))
+  socket.end(
+    'HTTP/1.1 ' + status + ' ' + (STATUS_CODES[status] || 'Error') +
+      '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+    () => socket.destroy(),
+  )
+}
 
 /** Read a bounded, form-encoded login body; never trust content-length alone. */
 export function readForm(req: IncomingMessage): Promise<string> {

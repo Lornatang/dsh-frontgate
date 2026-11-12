@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
 import { COOKIE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, validPasswordHash } from './auth.ts'
 import { resolveLogger } from './context.ts'
-import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, sameOrigin, text } from './http.ts'
+import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, rejectUpgrade, sameOrigin, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
@@ -67,8 +67,10 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   const exchangeTimeoutMs = intOr(cfg.exchangeTimeoutMs, DEFAULTS.exchangeTimeoutMs, 100, 60000)
   const maxConnectionsPerPeer = intOr(cfg.maxConnectionsPerPeer, DEFAULTS.maxConnectionsPerPeer, 0, 1024)
   const maxPendingLoginsPerIp = intOr(cfg.maxPendingLoginsPerIp, DEFAULTS.maxPendingLoginsPerIp, 1, 128)
+  const maxHttpRequestsPerSession = intOr(cfg.maxHttpRequestsPerSession, DEFAULTS.maxHttpRequestsPerSession, 1, 128)
   const upstreamHeaderTimeoutMs = intOr(cfg.upstreamHeaderTimeoutMs, DEFAULTS.upstreamHeaderTimeoutMs, 0, 3600000)
   const upstreamIdleTimeoutMs = intOr(cfg.upstreamIdleTimeoutMs, DEFAULTS.upstreamIdleTimeoutMs, 0, 3600000)
+  const websocketHandshakeTimeoutMs = intOr(cfg.websocketHandshakeTimeoutMs, DEFAULTS.websocketHandshakeTimeoutMs, 100, 3600000)
   const useTls = Boolean(cfg.tlsCertFile || cfg.tlsKeyFile)
   if (useTls && !(cfg.tlsCertFile && cfg.tlsKeyFile)) {
     throw new Error('dsh-frontgate: tlsCertFile and tlsKeyFile must be set together')
@@ -133,6 +135,7 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   }
 
   const active = new Map<Duplex | ServerResponse, { digest: string; timer?: NodeJS.Timeout }>()
+  const httpBySession = new Map<string, number>()
   const sessions = createSessionStore(statePath, persistedState, pv, (digest) => {
     for (const [connection, entry] of active) if (entry.digest === digest) connection.destroy()
   })
@@ -144,6 +147,7 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
     exchangeTimeoutMs,
     upstreamHeaderTimeoutMs,
     upstreamIdleTimeoutMs,
+    websocketHandshakeTimeoutMs,
     upstreamCa: cfg.upstreamCaFile ? readFileSync(String(cfg.upstreamCaFile)) : undefined,
     upstreamServerName: String(cfg.upstreamServerName || ''),
     authenticatedUrl: (baseUrl) => ctx.connection.authenticatedUrl(baseUrl),
@@ -168,6 +172,22 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
     harnessCookie: proxy.harnessCookie,
     validSession: sessions.valid,
     revokeSession: sessions.revoke,
+    admit: (req, res, token) => {
+      const digest = sessionDigest(token)
+      const count = httpBySession.get(digest) ?? 0
+      if (count >= maxHttpRequestsPerSession) {
+        req.resume()
+        text(res, 429, 'too many requests for this session\n', { 'retry-after': '1', connection: 'close' })
+        return false
+      }
+      httpBySession.set(digest, count + 1)
+      res.once('close', () => {
+        const remaining = (httpBySession.get(digest) ?? 1) - 1
+        if (remaining <= 0) httpBySession.delete(digest)
+        else httpBySession.set(digest, remaining)
+      })
+      return true
+    },
     forward: (req, res, cookie, token) => {
       if (!track(res, token)) return
       proxy.forward(req, res, cookie)
@@ -232,12 +252,12 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
     try {
       const token = cookieValue(req.headers.cookie, COOKIE)
       if (!token || !sessions.valid(token)) {
-        socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        rejectUpgrade(socket, 401)
         return
       }
       if (!sameOrigin(req, publicOrigin, useTls)) {
         logger.warn('websocket blocked: cross-origin upgrade from ' + String(req.headers.origin || ''))
-        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+        rejectUpgrade(socket, 403)
         return
       }
       if (!track(socket, token)) return
@@ -267,7 +287,7 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
         .catch((err: Error) => {
           if (socket.destroyed) return
           logger.warn('websocket blocked: ' + err.message)
-          socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
+          rejectUpgrade(socket, 503)
         })
     } catch (err) {
       logger.warn('upgrade error: ' + (err as Error).message)

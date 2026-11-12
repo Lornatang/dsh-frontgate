@@ -36,6 +36,10 @@ function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
       }
       if (req.url === '/hang-headers') return
       if (req.url === '/hang-body') { res.writeHead(200); res.write('partial'); return }
+      if (req.url === '/cacheable') {
+        res.writeHead(200, { 'cache-control': 'private, max-age=31536000, immutable' })
+        return res.end('private data')
+      }
       if (req.url === '/response-hop') {
         res.writeHead(200, { connection: 'X-Private, close', 'x-private': 'secret', 'x-visible': 'ok' })
         return res.end('ok')
@@ -129,6 +133,7 @@ function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
         liveStreamCount: () => liveStreams.size,
         hangingUpgrades: () => hangingUpgrades,
         sendToStreams: (data) => { for (const stream of liveStreams) stream.write(data) },
+        endOneStream: () => liveStreams.values().next().value?.end(),
         rotateCookie: () => { currentCookie = 'rotated-token' },
         close: () => new Promise((done) => {
           for (const socket of sockets) socket.destroy()
@@ -389,6 +394,16 @@ test('authenticated requests are proxied with rewritten headers', async (t) => {
   assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 1)
 })
 
+test('authenticated upstream responses cannot be cached by the browser', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const response = await request(gate.port, '/cacheable', { headers: { cookie } })
+  assert.equal(response.body, 'private data')
+  assert.equal(response.headers.get('cache-control'), 'private, no-store')
+  const logout = await request(gate.port, '/__gate/logout', { headers: { cookie } })
+  assert.equal(logout.headers.get('clear-site-data'), '"cache"')
+})
+
 test('upstream redirect Locations are rewritten', async (t) => {
   const { gate } = await withGate(t)
   const { cookie } = await login(gate.port)
@@ -622,6 +637,37 @@ test('concurrent login attempts from one client cannot bypass the lockout', asyn
   assert.equal((await login(gate.port)).res.status, 429)
 })
 
+test('a full failure store preserves existing lockouts and recovers when they expire', async (t) => {
+  const { gate } = await withGate(t, {
+    passwordHash: hashPassword(PASSWORD, { N: 1024 }), maxAttempts: 1, lockMinutes: 1, trustProxy: true,
+  })
+  t.mock.method(process.stderr, 'write', () => true)
+  const original = { 'x-forwarded-for': '198.51.100.1' }
+  assert.equal((await login(gate.port, 'wrong', '/', original)).res.status, 401)
+  for (let i = 0; i < 1022; i++) {
+    const ip = `203.0.${Math.floor(i / 256)}.${i % 256}`
+    assert.equal((await login(gate.port, 'wrong', '/', { 'x-forwarded-for': ip })).res.status, 401)
+  }
+  const concurrent = await Promise.all(['203.0.4.1', '203.0.4.2'].map(ip =>
+    login(gate.port, 'wrong', '/', { 'x-forwarded-for': ip })))
+  assert.deepEqual(concurrent.map(result => result.res.status).sort((a, b) => a - b), [401, 429])
+  assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.1' })).res.status, 429)
+  assert.equal((await login(gate.port, PASSWORD, '/', original)).res.status, 429)
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now + 61000)
+  assert.equal((await login(gate.port, PASSWORD, '/', original)).res.status, 303)
+  assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.1' })).res.status, 303)
+})
+
+test('partial login failures expire after the lockout window', async (t) => {
+  const { gate } = await withGate(t, { maxAttempts: 2, lockMinutes: 1 })
+  assert.equal((await login(gate.port, 'wrong')).res.status, 401)
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now + 61000)
+  assert.equal((await login(gate.port, 'wrong')).res.status, 401)
+  assert.equal((await login(gate.port, PASSWORD)).res.status, 303)
+})
+
 test('oversized login bodies are refused', async (t) => {
   const { gate } = await withGate(t)
   const res = await fetch('http://127.0.0.1:' + gate.port + '/__gate/login', {
@@ -687,6 +733,24 @@ test('partial headers cannot exhaust all server connections from one peer', asyn
   assert.equal(blocked, 'closed')
   sockets[0].destroy()
   await delay(100)
+  assert.equal((await request(gate.port, '/__gate/health')).res.status, 200)
+})
+
+test('rejected upgrades release the peer limit even if the client remains half-open', async (t) => {
+  const { gate } = await withGate(t, { maxConnectionsPerPeer: 1 })
+  const socket = new net.Socket({ allowHalfOpen: true })
+  t.after(() => socket.destroy())
+  socket.on('error', () => {})
+  let response = ''
+  let ended = false
+  socket.on('data', chunk => { response += chunk.toString() })
+  socket.on('end', () => { ended = true })
+  socket.connect(gate.port, '127.0.0.1')
+  await new Promise(resolve => socket.once('connect', resolve))
+  socket.write(`GET /ws HTTP/1.1\r\nHost: 127.0.0.1:${gate.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n`)
+  await waitFor(() => ended)
+  assert.match(response, /^HTTP\/1\.1 401/)
+  await delay(50)
   assert.equal((await request(gate.port, '/__gate/health')).res.status, 200)
 })
 
@@ -760,6 +824,21 @@ test('an established websocket outlives the configured response deadlines', asyn
   assert.equal(ws.socket.destroyed, false)
   ws.socket.write('after-silence')
   await waitFor(() => ws.text().includes('echo:after-silence'))
+})
+
+test('the independent websocket handshake deadline releases stalled upgrades only', async (t) => {
+  assert.equal(Config.dict.websocketHandshakeTimeoutMs.meta.default, 10000)
+  const { gate, upstream } = await withGate(t, { websocketHandshakeTimeoutMs: 150 })
+  const { cookie } = await login(gate.port)
+  const established = await openWebSocket(gate.port, cookie)
+  t.after(() => established.socket.destroy())
+  assert.match(established.text(), /^HTTP\/1\.1 101/)
+  const stalled = await openWebSocket(gate.port, cookie, undefined, undefined, '/ws-hang')
+  t.after(() => stalled.socket.destroy())
+  assert.match(stalled.text(), /^HTTP\/1\.1 504/)
+  await waitFor(() => upstream.hangingUpgrades() === 0)
+  established.socket.write('still-open')
+  await waitFor(() => established.text().includes('echo:still-open'))
 })
 
 test('a disconnected client does not leave a stalled websocket handshake open', async (t) => {
@@ -1047,6 +1126,18 @@ test('closed clients do not create upstream requests after a delayed exchange', 
   assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
 })
 
+test('per-session admission includes requests waiting for a harness cookie', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ delayExchangeMs: 350 })
+  const gate = await startGate(upstream.port, dir, { maxHttpRequestsPerSession: 1 })
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const first = request(gate.port, '/api/sessions', { headers: { cookie } })
+  await waitFor(() => upstream.seen.some(entry => entry.url.startsWith('/?token=')))
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 429)
+  assert.equal((await first).res.status, 200)
+})
+
 test('websocket bytes sent during a delayed exchange reach the upstream', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const upstream = await startUpstream({ delayExchangeMs: 300 })
@@ -1105,6 +1196,39 @@ test('silent authenticated streams stay open with the default idle timeout', asy
   upstream.sendToStreams('after-silence\n')
   await waitFor(() => stream.body().includes('after-silence'))
   stream.res.destroy()
+})
+
+test('per-session HTTP limits leave capacity for another session and release on close', async (t) => {
+  const { gate, upstream } = await withGate(t, { maxHttpRequestsPerSession: 2 })
+  const firstCookie = (await login(gate.port)).cookie
+  const secondCookie = (await login(gate.port)).cookie
+  const first = await openStream(gate.port, firstCookie)
+  const second = await openStream(gate.port, firstCookie)
+  t.after(() => { first.res.destroy(); second.res.destroy() })
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 429)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: secondCookie } })).res.status, 200)
+  first.res.destroy()
+  await waitFor(() => upstream.liveStreamCount() === 1)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 200)
+})
+
+test('a full upstream pool rejects new HTTP requests promptly and recovers', async (t) => {
+  const { gate, upstream } = await withGate(t, { maxHttpRequestsPerSession: 128 })
+  const firstCookie = (await login(gate.port)).cookie
+  const secondCookie = (await login(gate.port)).cookie
+  const socket = net.connect(gate.port, '127.0.0.1')
+  t.after(() => socket.destroy())
+  socket.on('error', () => {})
+  socket.on('data', () => {})
+  await new Promise(resolve => socket.once('connect', resolve))
+  socket.write(Array.from({ length: 128 }, () =>
+    `GET /live-stream HTTP/1.1\r\nHost: 127.0.0.1:${gate.port}\r\nCookie: ${firstCookie}\r\n\r\n`).join(''))
+  await waitFor(() => upstream.liveStreamCount() === 128, 10000)
+  const options = { headers: { cookie: secondCookie }, signal: AbortSignal.timeout(3000) }
+  assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 503)
+  upstream.endOneStream()
+  await waitFor(() => upstream.liveStreamCount() === 127)
+  assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 200)
 })
 
 test('an upstream 401 refreshes the cached cookie on the next HTTP or websocket request', async (t) => {

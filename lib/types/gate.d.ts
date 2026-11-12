@@ -28,6 +28,7 @@ export interface GateOptions {
     harnessCookie(): Promise<string>;
     validSession(token: string): boolean;
     revokeSession(token: string): boolean;
+    admit(req: IncomingMessage, res: ServerResponse, token: string): boolean;
     forward(req: IncomingMessage, res: ServerResponse, cookie: string, token: string): void;
     log: LogSink;
 }

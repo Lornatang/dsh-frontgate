@@ -37,10 +37,14 @@ export interface Config {
     maxConnectionsPerPeer: number;
     /** Maximum login forms being received from one client IP. */
     maxPendingLoginsPerIp: number;
+    /** Maximum simultaneous HTTP requests belonging to one gate session. */
+    maxHttpRequestsPerSession: number;
     /** Deadline for upstream response headers, including time queued for a socket; 0 disables. */
     upstreamHeaderTimeoutMs: number;
     /** Maximum idle time after upstream response headers; 0 disables. */
     upstreamIdleTimeoutMs: number;
+    /** Deadline for completing an upstream WebSocket handshake. */
+    websocketHandshakeTimeoutMs: number;
     /** Optional CA certificate for a private HTTPS harness. */
     upstreamCaFile: string;
     /** Optional TLS identity when connecting to an HTTPS harness by IP. */

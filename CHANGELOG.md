@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Close rejected upgrade sockets, bound WebSocket handshakes and prevent one
+  session or a saturated upstream pool from leaving HTTP requests queued forever.
+- Disable caching of authenticated responses and ask browsers to clear older
+  cached content at sign-out.
+- Preserve live login lockouts when the failure store is full and expire old
+  partial failure counts.
+
 ## 0.1.3 - 2026-11-12
 
 - Close HTTP streams, as well as WebSockets, when their gate session is revoked

@@ -9,11 +9,13 @@ import http from 'node:http'
 import https from 'node:https'
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { clientIp, connectHost, text } from './http.ts'
+import { clientIp, connectHost, rejectUpgrade, text } from './http.ts'
 import type { LogSink } from './context.ts'
 
 /** How long an exchanged harness cookie is reused. */
 const HARNESS_COOKIE_TTL = 25 * 60 * 1000
+/** Keep admission bounded before requests reach the agent's internal queue. */
+const MAX_UPSTREAM_HTTP = 128
 
 /** Headers that describe this hop or the browser, never the upstream request. */
 const REQUEST_DROP = new Set([
@@ -46,6 +48,7 @@ export interface ProxyOptions {
   exchangeTimeoutMs: number
   upstreamHeaderTimeoutMs: number
   upstreamIdleTimeoutMs: number
+  websocketHandshakeTimeoutMs: number
   upstreamCa?: Buffer
   upstreamServerName: string
   /** Absolute entry URL with the harness launch token attached. */
@@ -72,16 +75,17 @@ function sendUpstreamError(res: ServerResponse): void {
 /** Build the proxy for one harness origin. */
 export function createProxy(options: ProxyOptions): Proxy {
   const { targetOrigin, publicProto, trustProxy, exchangeTimeoutMs, upstreamHeaderTimeoutMs,
-    upstreamIdleTimeoutMs, upstreamCa, upstreamServerName, authenticatedUrl, log } = options
+    upstreamIdleTimeoutMs, websocketHandshakeTimeoutMs, upstreamCa, upstreamServerName, authenticatedUrl, log } = options
   const target = new URL(targetOrigin)
   const secureUpstream = target.protocol === 'https:'
   const transport = secureUpstream ? https : http
   const AgentClass = secureUpstream ? https.Agent : http.Agent
-  const upstreamAgent = new AgentClass({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 })
+  const upstreamAgent = new AgentClass({ keepAlive: true, maxSockets: MAX_UPSTREAM_HTTP, keepAliveMsecs: 1000 })
   const tlsOptions = secureUpstream
     ? { ...(upstreamCa ? { ca: upstreamCa } : {}), ...(upstreamServerName ? { servername: upstreamServerName } : {}) }
     : {}
   const exchanges = new Set<http.ClientRequest>()
+  let activeHttp = 0
 
   /** One GET / with the launch token; the response carries the harness cookie. */
   function exchangeHarnessCookie(): Promise<string> {
@@ -168,6 +172,13 @@ export function createProxy(options: ProxyOptions): Proxy {
   }
 
   function forward(req: IncomingMessage, res: ServerResponse, cookie: string): void {
+    if (activeHttp >= MAX_UPSTREAM_HTTP) {
+      req.resume()
+      text(res, 503, 'dsh-frontgate: upstream is busy\n', { 'retry-after': '1', connection: 'close' })
+      return
+    }
+    activeHttp += 1
+    res.once('close', () => { activeHttp -= 1 })
     const started = Date.now()
     let headerTimer: NodeJS.Timeout | undefined
     let idleTimer: NodeJS.Timeout | undefined
@@ -195,6 +206,8 @@ export function createProxy(options: ProxyOptions): Proxy {
       for (const [key, value] of Object.entries(proxyRes.headers)) {
         if (!RESPONSE_DROP.has(key) && !connection.has(key)) headers[key] = value
       }
+      // A browser must not reuse authenticated data after the gate session ends.
+      headers['cache-control'] = 'private, no-store'
       const location = proxyRes.headers['location']
       if (location !== undefined && !connection.has('location')) headers.location = rewriteLocation(location)
       const status = proxyRes.statusCode || 502
@@ -241,7 +254,7 @@ export function createProxy(options: ProxyOptions): Proxy {
   function forwardUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, cookie: string): void {
     const requested = req.headers.upgrade
     if (typeof requested !== 'string' || !requested.trim()) {
-      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      rejectUpgrade(socket, 400)
       return
     }
     const headers = upstreamHeaders(req, cookie)
@@ -268,8 +281,9 @@ export function createProxy(options: ProxyOptions): Proxy {
     }
     const onPendingEnd = (): void => { socket.destroy(); proxyReq.destroy() }
     let connectTimer: NodeJS.Timeout | undefined = setTimeout(() => fail(502, 'connect timeout'), 10000)
-    let headerTimer: NodeJS.Timeout | undefined = upstreamHeaderTimeoutMs
-      ? setTimeout(() => fail(504, 'response headers timeout'), upstreamHeaderTimeoutMs) : undefined
+    const handshakeTimeout = upstreamHeaderTimeoutMs
+      ? Math.min(upstreamHeaderTimeoutMs, websocketHandshakeTimeoutMs) : websocketHandshakeTimeoutMs
+    let headerTimer: NodeJS.Timeout | undefined = setTimeout(() => fail(504, 'response headers timeout'), handshakeTimeout)
     const clearTimers = (): void => {
       if (connectTimer) clearTimeout(connectTimer)
       if (headerTimer) clearTimeout(headerTimer)
@@ -281,7 +295,7 @@ export function createProxy(options: ProxyOptions): Proxy {
       finished = true
       clearTimers()
       if (message) log.warn('websocket ' + String(req.url || '/').split('?')[0] + ': ' + message)
-      if (!socket.destroyed) socket.end('HTTP/1.1 ' + status + ' ' + (http.STATUS_CODES[status] || 'Error') + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+      rejectUpgrade(socket, status)
       proxyReq.destroy()
     }
     proxyReq.on('socket', (upstreamSocket) => {

@@ -1,10 +1,5 @@
-/**
- * Request parsing and response helpers shared by the login page and the proxy.
- *
- * Everything here is deliberately small: bounded body reads, one origin check,
- * one redirect sanitizer and one set of gate headers.
- */
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
 /** Largest accepted login form body. */
 export declare const MAX_FORM: number;
 /** Longest time a login body may take to arrive. */
@@ -38,6 +33,8 @@ export declare const html: (res: ServerResponse, status: number, body: string) =
 export declare const json: (res: ServerResponse, status: number, payload: unknown) => void;
 export declare const text: (res: ServerResponse, status: number, body: string, extra?: OutgoingHttpHeaders) => void;
 export declare const redirect: (res: ServerResponse, location: string, status?: number) => void;
+/** Flush a rejected upgrade, then close even if the peer keeps its write side open. */
+export declare function rejectUpgrade(socket: Duplex, status: number): void;
 /** Read a bounded, form-encoded login body; never trust content-length alone. */
 export declare function readForm(req: IncomingMessage): Promise<string>;
 export declare const isLoopbackHost: (host: string) => boolean;

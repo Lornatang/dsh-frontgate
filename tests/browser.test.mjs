@@ -194,6 +194,40 @@ test('browser websocket stays open without receiving an upstream cookie', browse
   assert.equal(cookies.some((cookie) => cookie.name === 'upstream_leak'), false)
 })
 
+test('logout clears an older cached protected file in a trustworthy browser origin', browserOptions, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-cache-'))
+  const upstream = makeUpstream()
+  await listen(upstream.server)
+  const oldGate = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'private, max-age=31536000, immutable' })
+    res.end('previously cached private data')
+  })
+  await listen(oldGate)
+  const port = oldGate.address().port
+  const origin = `http://127.0.0.1:${port}`
+  const file = origin + '/api/file?path=%2Ftmp%2Fprivate.txt&v=1'
+  let browser
+  let gate
+  t.after(async () => {
+    await browser?.close()
+    gate?.stop()
+    if (oldGate.listening) await close(oldGate)
+    await upstream.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+  })
+  browser = await startBrowser(dir)
+  await browser.navigate(file)
+  assert.match(await browser.evaluate('document.body.innerText'), /previously cached private data/)
+  await close(oldGate)
+  gate = startGate(dir, upstream.server, { listenPort: port })
+  await gate.ready()
+  await browser.navigate(origin + '/__gate/login')
+  await browser.submit(`document.querySelector('input[name="password"]').value=${JSON.stringify(password)}; document.querySelector('form').requestSubmit()`)
+  await browser.navigate(origin + '/__gate/logout')
+  await browser.navigate(file)
+  assert.match(await browser.evaluate('document.body.innerText'), /unauthorized/)
+})
+
 test('browser login succeeds when the external and listener ports differ', browserOptions, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-port-'))
   const upstream = makeUpstream()

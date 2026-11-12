@@ -43,6 +43,7 @@ export interface GateOptions {
   harnessCookie(): Promise<string>
   validSession(token: string): boolean
   revokeSession(token: string): boolean
+  admit(req: IncomingMessage, res: ServerResponse, token: string): boolean
   forward(req: IncomingMessage, res: ServerResponse, cookie: string, token: string): void
   log: LogSink
 }
@@ -50,6 +51,7 @@ export interface GateOptions {
 interface Failure {
   count: number
   until: number
+  expiresAt: number
 }
 
 /** Build the request handler for one gate instance. */
@@ -64,27 +66,39 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
   let checksInFlight = 0
 
   function lockRemaining(ip: string): number {
-    const entry = failures.get(ip)
-    if (!entry || !entry.until) return 0
-    if (entry.until > Date.now()) return entry.until - Date.now()
-    failures.delete(ip)
-    return 0
+    const now = Date.now()
+    let entry = failures.get(ip)
+    if (entry && entry.expiresAt <= now && !clientsInFlight.has(ip)) {
+      failures.delete(ip)
+      entry = undefined
+    }
+    if (entry) return Math.max(0, entry.until - now)
+    if (failures.size < MAX_TRACKED_CLIENTS) return 0
+
+    // Never evict a live failure or lockout. When full, fail closed for new
+    // clients until an existing record expires, while keeping memory bounded.
+    let earliest = Infinity
+    for (const [client, failure] of failures) {
+      if (failure.expiresAt <= now && !clientsInFlight.has(client)) failures.delete(client)
+      else earliest = Math.min(earliest, failure.expiresAt)
+    }
+    if (failures.size < MAX_TRACKED_CLIENTS) return 0
+    return Math.max(1000, earliest - now)
   }
 
   function recordFailure(ip: string): void {
     let entry = failures.get(ip)
     if (!entry) {
-      if (failures.size >= MAX_TRACKED_CLIENTS) {
-        const oldest = failures.keys().next().value
-        if (oldest !== undefined) failures.delete(oldest)
-      }
-      entry = { count: 0, until: 0 }
+      if (failures.size >= MAX_TRACKED_CLIENTS) return
+      entry = { count: 0, until: 0, expiresAt: 0 }
       failures.set(ip, entry)
     }
+    const now = Date.now()
     entry.count += 1
+    entry.expiresAt = now + lockMs
     if (entry.count >= maxAttempts) {
       entry.count = 0
-      entry.until = Date.now() + lockMs
+      entry.until = entry.expiresAt
     }
   }
 
@@ -136,11 +150,16 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
       if (clientsInFlight.has(ip) || checksInFlight >= CHECK_CONCURRENCY) {
         return text(res, 429, 'busy, retry shortly\n', { 'retry-after': '1' })
       }
+      const reserved = !failures.has(ip)
+      if (reserved) failures.set(ip, { count: 0, until: 0, expiresAt: Date.now() + lockMs })
       clientsInFlight.add(ip)
       checksInFlight += 1
       let ok = false
       try {
         ok = await verifyPassword(new URLSearchParams(form).get('password') || '', passwordHash)
+      } catch (err) {
+        if (reserved) failures.delete(ip)
+        throw err
       } finally {
         checksInFlight -= 1
         clientsInFlight.delete(ip)
@@ -183,6 +202,7 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
         }
       }
       res.setHeader('set-cookie', clearCookie(secureCookie))
+      res.setHeader('clear-site-data', '"cache"')
       return redirect(res, '/__gate/login')
     }
     if (path.startsWith('/__gate/')) return text(res, 404, 'not found\n')
@@ -201,6 +221,8 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
       if (path === '/api' || path.startsWith('/api/')) return json(res, 403, { error: 'forbidden' })
       return text(res, 403, 'forbidden\n')
     }
+
+    if (!options.admit(req, res, token)) return
 
     let cookie: string
     try {

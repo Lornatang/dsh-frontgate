@@ -38,10 +38,14 @@ export interface Config {
   maxConnectionsPerPeer: number
   /** Maximum login forms being received from one client IP. */
   maxPendingLoginsPerIp: number
+  /** Maximum simultaneous HTTP requests belonging to one gate session. */
+  maxHttpRequestsPerSession: number
   /** Deadline for upstream response headers, including time queued for a socket; 0 disables. */
   upstreamHeaderTimeoutMs: number
   /** Maximum idle time after upstream response headers; 0 disables. */
   upstreamIdleTimeoutMs: number
+  /** Deadline for completing an upstream WebSocket handshake. */
+  websocketHandshakeTimeoutMs: number
   /** Optional CA certificate for a private HTTPS harness. */
   upstreamCaFile: string
   /** Optional TLS identity when connecting to an HTTPS harness by IP. */
@@ -65,8 +69,10 @@ export const DEFAULTS: Config = {
   exchangeTimeoutMs: 5000,
   maxConnectionsPerPeer: 64,
   maxPendingLoginsPerIp: 4,
+  maxHttpRequestsPerSession: 32,
   upstreamHeaderTimeoutMs: 0,
   upstreamIdleTimeoutMs: 0,
+  websocketHandshakeTimeoutMs: 10000,
   upstreamCaFile: '',
   upstreamServerName: '',
 }
@@ -88,8 +94,10 @@ export const Config: z<Config> = z.object({
   exchangeTimeoutMs: z.natural().min(100).max(60000).default(DEFAULTS.exchangeTimeoutMs),
   maxConnectionsPerPeer: z.natural().max(1024).default(DEFAULTS.maxConnectionsPerPeer),
   maxPendingLoginsPerIp: z.natural().min(1).max(128).default(DEFAULTS.maxPendingLoginsPerIp),
+  maxHttpRequestsPerSession: z.natural().min(1).max(128).default(DEFAULTS.maxHttpRequestsPerSession),
   upstreamHeaderTimeoutMs: z.natural().max(3600000).default(DEFAULTS.upstreamHeaderTimeoutMs),
   upstreamIdleTimeoutMs: z.natural().max(3600000).default(DEFAULTS.upstreamIdleTimeoutMs),
+  websocketHandshakeTimeoutMs: z.natural().min(100).max(3600000).default(DEFAULTS.websocketHandshakeTimeoutMs),
   upstreamCaFile: z.string().default(DEFAULTS.upstreamCaFile),
   upstreamServerName: z.string().default(DEFAULTS.upstreamServerName),
 })
