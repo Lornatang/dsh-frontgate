@@ -9,6 +9,8 @@ export interface ProxyOptions {
     publicProto: 'http' | 'https';
     /** Honour forwarded headers from a proxy in front of the gate. */
     trustProxy: boolean;
+    /** Maximum time spent exchanging a launch token, including connection time. */
+    exchangeTimeoutMs: number;
     /** Absolute entry URL with the harness launch token attached. */
     authenticatedUrl(baseUrl: string): string;
     log: LogSink;

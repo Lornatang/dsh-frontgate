@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import net from 'node:net'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, hashPassword, injectPolyfill } from '../lib/index.js'
@@ -11,7 +11,7 @@ import { apply, hashPassword, injectPolyfill } from '../lib/index.js'
 const PASSWORD = 'correct horse battery staple'
 const HASH = hashPassword(PASSWORD)
 
-function startUpstream() {
+function startUpstream({ hangExchanges = 0 } = {}) {
   return new Promise((resolve) => {
     const seen = []
     const sockets = new Set()
@@ -19,6 +19,7 @@ function startUpstream() {
     const server = http.createServer((req, res) => {
       seen.push({ method: req.method, url: req.url, headers: req.headers })
       if (req.url.startsWith('/?token=')) {
+        if (hangExchanges > 0) { hangExchanges -= 1; return }
         res.writeHead(303, { 'set-cookie': 'dsh-auth=launch-token; Path=/; HttpOnly', location: './' })
         return res.end()
       }
@@ -125,14 +126,33 @@ function setCookies(res) {
 }
 
 async function request(port, path, options = {}) {
+  // fetch deliberately replaces Host with the destination; raw HTTP is needed
+  // to exercise a reverse proxy preserving or changing that header.
+  if (options.headers?.host) {
+    return new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path, method: options.method || 'GET', headers: options.headers }, (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () => {
+          const headers = new Headers()
+          for (const [name, value] of Object.entries(response.headers)) {
+            for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) headers.append(name, item)
+          }
+          const res = { status: response.statusCode, headers }
+          resolve({ res, body: Buffer.concat(chunks).toString(), headers, cookies: setCookies(res) })
+        })
+      })
+      req.on('error', reject)
+      req.end(options.body)
+    })
+  }
   const res = await fetch('http://127.0.0.1:' + port + path, { redirect: 'manual', ...options })
   const body = await res.text()
   return { res, body, headers: res.headers, cookies: setCookies(res) }
 }
 
 async function login(port, password = PASSWORD, next = '/', extraHeaders = {}) {
-  const res = await fetch('http://127.0.0.1:' + port + '/__gate/login?next=' + encodeURIComponent(next), {
-    redirect: 'manual',
+  const { res, body, cookies } = await request(port, '/__gate/login?next=' + encodeURIComponent(next), {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
@@ -141,12 +161,10 @@ async function login(port, password = PASSWORD, next = '/', extraHeaders = {}) {
     },
     body: 'password=' + encodeURIComponent(password),
   })
-  const body = await res.text()
-  const cookies = setCookies(res)
   return { res, body, cookies, cookie: cookies.length ? cookies[0].split(';')[0] : '' }
 }
 
-function openWebSocket(port, cookie, origin) {
+function openWebSocket(port, cookie, origin, host = '127.0.0.1:' + port) {
   return new Promise((resolve) => {
     const socket = net.connect(port, '127.0.0.1')
     let buffer = ''
@@ -159,7 +177,7 @@ function openWebSocket(port, cookie, origin) {
     socket.on('connect', () => {
       const head = [
         'GET /ws HTTP/1.1',
-        'Host: 127.0.0.1:' + port,
+        'Host: ' + host,
         'Upgrade: websocket',
         'Connection: Upgrade',
         'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
@@ -321,16 +339,26 @@ test('login next targets stay on site', async (t) => {
   }
 })
 
-test('repeated failures answer 429 but a correct password still signs in', async (t) => {
-  const { gate } = await withGate(t, { maxAttempts: 2, lockMinutes: 1 })
+test('lockout rejects all passwords until the window expires, per client', async (t) => {
+  const { gate } = await withGate(t, { maxAttempts: 2, lockMinutes: 1, trustProxy: true })
   assert.equal((await login(gate.port, 'nope')).res.status, 401)
   assert.equal((await login(gate.port, 'nope')).res.status, 401)
   const locked = await login(gate.port, 'nope')
   assert.equal(locked.res.status, 429)
   assert.ok(locked.res.headers.get('retry-after'))
-  // Correct passwords are verified even while the client is throttled, so a
-  // shared address (Docker NAT) cannot be locked out by one client.
+  assert.equal((await login(gate.port, PASSWORD)).res.status, 429)
+  assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.7' })).res.status, 303)
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now + 61000)
   assert.equal((await login(gate.port, PASSWORD)).res.status, 303)
+})
+
+test('concurrent login attempts from one client cannot bypass the lockout', async (t) => {
+  const { gate } = await withGate(t, { maxAttempts: 1, lockMinutes: 1 })
+  const results = await Promise.all(Array.from({ length: 6 }, () => login(gate.port, 'wrong-password')))
+  assert.equal(results.filter((result) => result.res.status === 401).length, 1)
+  assert.equal(results.filter((result) => result.res.status === 429).length, 5)
+  assert.equal((await login(gate.port)).res.status, 429)
 })
 
 test('oversized login bodies are refused', async (t) => {
@@ -495,6 +523,81 @@ test('cross-origin login origins with a foreign port are rejected', async (t) =>
   assert.equal(cookies.length, 0)
 })
 
+test('scheme, default port, Fetch-Site and Host are checked, ignoring forwarded proto', async (t) => {
+  const { gate } = await withGate(t)
+  for (const headers of [
+    { origin: 'https://127.0.0.1:' + gate.port },
+    { host: '127.0.0.1', origin: 'http://127.0.0.1:' + gate.port },
+    { origin: 'http://127.0.0.1:' + gate.port, 'sec-fetch-site': 'same-site' },
+    { origin: 'https://127.0.0.1:' + gate.port, 'x-forwarded-proto': 'https' },
+  ]) {
+    const result = await login(gate.port, PASSWORD, '/', headers)
+    assert.equal(result.res.status, 403)
+    assert.equal(result.cookies.length, 0)
+  }
+})
+
+test('configured public origin validates proxy Host and marks login and logout cookies Secure', async (t) => {
+  const { gate } = await withGate(t, { publicOrigin: 'https://gate.example:8443' })
+  const headers = { host: 'gate.example:8443', origin: 'https://gate.example:8443' }
+  const good = await login(gate.port, PASSWORD, '/', headers)
+  assert.equal(good.res.status, 303)
+  assert.match(good.cookies[0], /; Secure(?:;|$)/)
+  const logout = await request(gate.port, '/__gate/logout', { headers })
+  assert.match(logout.cookies[0], /; Secure(?:;|$)/)
+  for (const bad of [
+    { host: 'gate.example', origin: 'https://gate.example:8443' },
+    { host: 'gate.example:8443', origin: 'http://gate.example:8443' },
+    { host: 'gate.example:8443', origin: 'https://gate.example:9443' },
+    { host: 'evil.example:8443', origin: 'https://evil.example:8443' },
+  ]) assert.equal((await login(gate.port, PASSWORD, '/', bad)).res.status, 403)
+  const spoofed = await request(gate.port, '/api/sessions', { headers: { host: 'evil.example', cookie: good.cookie } })
+  assert.equal(spoofed.res.status, 403)
+})
+
+test('invalid public origins and password hashes fail before creating state', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const { ctx } = makeCtx(1, dir)
+  for (const value of ['ftp://gate.example', 'https://user@gate.example', 'https://gate.example/path', 'https://gate.example?x=1']) {
+    assert.throws(() => apply(ctx, { publicOrigin: value }), /publicOrigin/)
+  }
+  assert.throws(() => apply(ctx, { passwordHash: 'invalid' }), /invalid passwordHash/)
+})
+
+test('a timed-out harness exchange returns 503 and the next request retries', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ hangExchanges: 1 })
+  const gate = await startGate(upstream.port, dir, { exchangeTimeoutMs: 150 })
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const options = { headers: { cookie }, signal: AbortSignal.timeout(3000) }
+  const failed = await Promise.all([request(gate.port, '/api/sessions', options), request(gate.port, '/api/sessions', options)])
+  assert.deepEqual(failed.map((result) => result.res.status), [503, 503])
+  assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 1)
+  assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 200)
+  assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 2)
+})
+
+test('a synchronous launch URL error does not permanently cache a failed exchange', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  const made = makeCtx(upstream.port, dir)
+  let calls = 0
+  made.ctx.connection.authenticatedUrl = (base) => {
+    if (++calls === 1) throw new Error('simulated launch URL error')
+    return base + '?token=launch-token'
+  }
+  const gate = apply(made.ctx, { listenPort: 0, passwordHash: HASH })
+  await gate.ready()
+  t.after(async () => { gate.stop(); made.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const port = gate.address().port
+  const { cookie } = await login(port)
+  assert.equal((await request(port, '/api/sessions', { headers: { cookie } })).res.status, 503)
+  assert.equal((await request(port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  assert.equal(calls, 2)
+})
+
 test('cross-origin proxy requests are refused', async (t) => {
   const { gate, upstream } = await withGate(t)
   const { cookie } = await login(gate.port)
@@ -507,6 +610,12 @@ test('cross-origin proxy requests are refused', async (t) => {
   assert.equal(cross.res.status, 403)
   assert.deepEqual(JSON.parse(cross.body), { error: 'forbidden' })
   assert.equal(upstream.seen.filter((entry) => entry.method === 'POST').length, 0)
+  const strippedPort = await request(gate.port, '/api/sessions', {
+    method: 'POST',
+    headers: { cookie, host: '127.0.0.1', origin: 'http://127.0.0.1:' + gate.port },
+    body: '{}',
+  })
+  assert.equal(strippedPort.res.status, 403)
   const same = await request(gate.port, '/api/sessions', {
     method: 'POST',
     headers: { cookie, origin: 'http://127.0.0.1:' + gate.port, 'content-type': 'application/json' },
@@ -522,6 +631,9 @@ test('cross-origin websocket upgrades are refused', async (t) => {
   const cross = await openWebSocket(gate.port, cookie, 'http://evil.example')
   assert.match(cross.text(), /HTTP\/1\.1 403/)
   cross.socket.destroy()
+  const strippedPort = await openWebSocket(gate.port, cookie, 'http://127.0.0.1:' + gate.port, '127.0.0.1')
+  assert.match(strippedPort.text(), /HTTP\/1\.1 403/)
+  strippedPort.socket.destroy()
   const same = await openWebSocket(gate.port, cookie, 'http://127.0.0.1:' + gate.port)
   assert.match(same.text(), /HTTP\/1\.1 101/)
   same.socket.destroy()
@@ -542,6 +654,98 @@ test('state file permissions are tightened on startup', async (t) => {
     rmSync(dir, { recursive: true, force: true })
   })
   assert.equal(statSync(statePath).mode & 0o777, 0o600)
+})
+
+test('malformed state is preserved instead of silently resetting credentials', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const path = join(dataDir, 'dsh-frontgate.json')
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const { ctx } = makeCtx(1, dir)
+  for (const data of ['{"passwordHash":', '{}', JSON.stringify({ passwordHash: HASH, secret: 'short' })]) {
+    writeFileSync(path, data, { mode: 0o600 })
+    assert.throws(() => apply(ctx, { listenPort: 0, passwordHash: HASH }), /invalid state file/)
+    assert.equal(readFileSync(path, 'utf8'), data)
+  }
+})
+
+test('a state symlink is rejected', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const target = join(dir, 'state-target')
+  writeFileSync(target, JSON.stringify({ passwordHash: HASH, secret: 'a'.repeat(64) }), { mode: 0o600 })
+  symlinkSync(target, join(dataDir, 'dsh-frontgate.json'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  assert.throws(() => apply(makeCtx(1, dir).ctx, { passwordHash: HASH }), /regular file/)
+})
+
+test('permission failures reject exposed state but permit an already private file', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX mode test')
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const path = join(dataDir, 'dsh-frontgate.json')
+  writeFileSync(path, JSON.stringify({ passwordHash: HASH, secret: 'a'.repeat(64) }))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const script = `
+    import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; import { join } from 'node:path'
+    fs.chmodSync = () => { const error = new Error('permission denied'); error.code = 'EPERM'; throw error }
+    syncBuiltinESMExports()
+    const { apply } = await import('./lib/index.js')
+    const ctx = { profileContext: { patchPath: join(process.argv[1], 'cordis.patch.yml') },
+      webServer: { getOrigin: () => 'http://127.0.0.1:1', tapIndex: () => () => {} },
+      connection: { authenticatedUrl: url => url }, effect: fn => fn() }
+    try { const gate = apply(ctx, { listenPort: 0 }); await gate.ready(); gate.stop() }
+    catch (error) { console.error(error.message); process.exitCode = 1 }
+  `
+  const start = () => spawnSync(process.execPath, ['--input-type=module', '-e', script, dir], {
+    cwd: new URL('..', import.meta.url), encoding: 'utf8',
+  })
+  chmodSync(path, 0o644)
+  const exposed = start()
+  assert.equal(exposed.status, 1)
+  assert.match(exposed.stderr, /cannot secure state file permissions/)
+  chmodSync(path, 0o600)
+  assert.equal(start().status, 0)
+})
+
+test('failed atomic replacement leaves the original state intact', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const dataDir = join(dir, 'data')
+  mkdirSync(dataDir, { recursive: true })
+  const path = join(dataDir, 'dsh-frontgate.json')
+  const original = JSON.stringify({ passwordHash: HASH, secret: 'a'.repeat(64) })
+  writeFileSync(path, original, { mode: 0o600 })
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const script = `
+    import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; import { join } from 'node:path'
+    fs.renameSync = () => { throw new Error('simulated rename failure') }; syncBuiltinESMExports()
+    const { apply } = await import('./lib/index.js')
+    const ctx = { profileContext: { patchPath: join(process.argv[1], 'cordis.patch.yml') },
+      webServer: { getOrigin: () => 'http://127.0.0.1:1', tapIndex: () => () => {} },
+      connection: { authenticatedUrl: url => url }, effect: fn => fn() }
+    try { apply(ctx, { password: 'a-new-strong-password' }) } catch (error) { console.error(error.message); process.exitCode = 1 }
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script, dir], {
+    cwd: new URL('..', import.meta.url), encoding: 'utf8',
+  })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /simulated rename failure/)
+  assert.equal(readFileSync(path, 'utf8'), original)
+  assert.deepEqual(readdirSync(dataDir), ['dsh-frontgate.json'])
+})
+
+test('a valid session survives a restart with the same state', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream()
+  const first = await startGate(upstream.port, dir)
+  const { cookie } = await login(first.port)
+  first.dispose()
+  const second = await startGate(upstream.port, dir)
+  t.after(async () => { second.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  assert.equal((await request(second.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
 })
 
 test('unknown gate routes are not proxied', async (t) => {

@@ -15,9 +15,9 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
-import { COOKIE, HASH_RE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, verifyToken } from './auth.ts'
+import { COOKIE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, validPasswordHash, verifyToken } from './auth.ts'
 import { resolveLogger } from './context.ts'
-import { clientIp, cookieValue, intOr, isLoopbackHost, originMatchesHost, text } from './http.ts'
+import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, sameOrigin, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
@@ -51,27 +51,43 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
   const sessionSeconds = intOr(cfg.sessionDays, DEFAULTS.sessionDays, 1, 365) * 86400
   const maxAttempts = intOr(cfg.maxAttempts, DEFAULTS.maxAttempts, 1, 50)
   const lockMs = intOr(cfg.lockMinutes, DEFAULTS.lockMinutes, 1, 1440) * 60000
+  const exchangeTimeoutMs = intOr(cfg.exchangeTimeoutMs, DEFAULTS.exchangeTimeoutMs, 100, 60000)
+  const useTls = Boolean(cfg.tlsCertFile || cfg.tlsKeyFile)
+  if (useTls && !(cfg.tlsCertFile && cfg.tlsKeyFile)) {
+    throw new Error('dsh-frontgate: tlsCertFile and tlsKeyFile must be set together')
+  }
+  const publicOrigin = normalizePublicOrigin(String(cfg.publicOrigin || ''))
+  if (useTls && publicOrigin && !publicOrigin.startsWith('https://')) {
+    throw new Error('dsh-frontgate: publicOrigin must use HTTPS when the gate serves TLS')
+  }
+  const publicProto = publicOrigin ? new URL(publicOrigin).protocol.slice(0, -1) as 'http' | 'https' : useTls ? 'https' : 'http'
+  const tlsOptions = useTls
+    ? { cert: readFileSync(String(cfg.tlsCertFile)), key: readFileSync(String(cfg.tlsKeyFile)) }
+    : undefined
 
   // Per-profile state: password hash + cookie signing secret, 0600.
   const statePath = statePathFor(ctx.profileContext?.patchPath)
-  const state = readState(statePath)
-  tightenState(statePath)
+  const stateExists = tightenState(statePath)
+  const state = readState(statePath, stateExists)
 
   // Password precedence: config hash, config password, env hash, env password,
   // state file, then a generated password shown once.
   const configuredPassword = typeof cfg.password === 'string' ? cfg.password : ''
   const envPassword = typeof process.env.DSH_FRONTGATE_PASSWORD === 'string' ? process.env.DSH_FRONTGATE_PASSWORD : ''
-  const envPasswordHash =
-    typeof process.env.DSH_FRONTGATE_PASSWORD_HASH === 'string' && HASH_RE.test(process.env.DSH_FRONTGATE_PASSWORD_HASH)
-      ? process.env.DSH_FRONTGATE_PASSWORD_HASH
-      : ''
+  const envPasswordHash = process.env.DSH_FRONTGATE_PASSWORD_HASH || ''
+  if (cfg.passwordHash && !validPasswordHash(cfg.passwordHash)) {
+    throw new Error('dsh-frontgate: invalid passwordHash')
+  }
+  if (!cfg.passwordHash && !configuredPassword && envPasswordHash && !validPasswordHash(envPasswordHash)) {
+    throw new Error('dsh-frontgate: invalid DSH_FRONTGATE_PASSWORD_HASH')
+  }
   let passwordHash = ''
   let generatedPassword = ''
   if (typeof cfg.passwordHash === 'string' && cfg.passwordHash) passwordHash = cfg.passwordHash
   else if (configuredPassword) passwordHash = hashFor(assertStrongPassword(configuredPassword, 'the "password" option'), state)
   else if (envPasswordHash) passwordHash = envPasswordHash
   else if (envPassword) passwordHash = hashFor(assertStrongPassword(envPassword, 'DSH_FRONTGATE_PASSWORD'), state)
-  else if (typeof state.passwordHash === 'string' && HASH_RE.test(state.passwordHash)) passwordHash = state.passwordHash
+  else if (validPasswordHash(state.passwordHash)) passwordHash = state.passwordHash
   if (!passwordHash) {
     generatedPassword = randomPassword()
     passwordHash = hashPassword(generatedPassword)
@@ -94,19 +110,11 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
     throw new Error('dsh-frontgate: listenPort ' + listenPort + ' collides with the harness listener ' + targetOrigin)
   }
 
-  const useTls = Boolean(cfg.tlsCertFile || cfg.tlsKeyFile)
-  if (useTls && !(cfg.tlsCertFile && cfg.tlsKeyFile)) {
-    throw new Error('dsh-frontgate: tlsCertFile and tlsKeyFile must be set together')
-  }
-  const publicProto = useTls ? 'https' : 'http'
-  const tlsOptions = useTls
-    ? { cert: readFileSync(String(cfg.tlsCertFile)), key: readFileSync(String(cfg.tlsKeyFile)) }
-    : undefined
-
   const proxy = createProxy({
     targetOrigin,
     publicProto,
     trustProxy: Boolean(cfg.trustProxy),
+    exchangeTimeoutMs,
     authenticatedUrl: (baseUrl) => ctx.connection.authenticatedUrl(baseUrl),
     log: logger,
   })
@@ -122,6 +130,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
       lockMs,
       trustProxy: Boolean(cfg.trustProxy),
       useTls,
+      publicOrigin,
+      secureCookie: publicProto === 'https',
     },
     harnessCookie: proxy.harnessCookie,
     forward: proxy.forward,
@@ -153,7 +163,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
         socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
         return
       }
-      if (!originMatchesHost(req)) {
+      if (!sameOrigin(req, publicOrigin, useTls)) {
         logger.warn('websocket blocked: cross-origin upgrade from ' + String(req.headers.origin || ''))
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
         return
@@ -197,9 +207,15 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
         server.removeListener('error', reject)
         const address = server.address()
         const port = address && typeof address === 'object' ? address.port : listenPort
-        logger.info('listening on ' + publicProto + '://' + listenHost + ':' + port + ' -> ' + targetOrigin)
+        logger.info('listening on ' + (useTls ? 'https' : 'http') + '://' + listenHost + ':' + port + ' -> ' + targetOrigin)
         if (!isLoopbackHost(listenHost) && !useTls) {
           logger.warn('plaintext HTTP is exposed on ' + listenHost + '; terminate TLS or use a VPN')
+        }
+        if (!isLoopbackHost(listenHost)) {
+          logger.warn('use a dedicated hostname or IP: browser cookies are shared across ports')
+        }
+        if (cfg.trustProxy) {
+          logger.warn('trustProxy is enabled; restrict access to this listener to trusted proxies')
         }
         const bound = ctx.webServer.config?.host
         if (typeof bound === 'string' && !isLoopbackHost(bound)) {

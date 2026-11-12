@@ -38,6 +38,8 @@ export interface ProxyOptions {
   publicProto: 'http' | 'https'
   /** Honour forwarded headers from a proxy in front of the gate. */
   trustProxy: boolean
+  /** Maximum time spent exchanging a launch token, including connection time. */
+  exchangeTimeoutMs: number
   /** Absolute entry URL with the harness launch token attached. */
   authenticatedUrl(baseUrl: string): string
   log: LogSink
@@ -61,17 +63,27 @@ function sendUpstreamError(res: ServerResponse): void {
 
 /** Build the proxy for one harness origin. */
 export function createProxy(options: ProxyOptions): Proxy {
-  const { targetOrigin, publicProto, trustProxy, authenticatedUrl, log } = options
+  const { targetOrigin, publicProto, trustProxy, exchangeTimeoutMs, authenticatedUrl, log } = options
   const target = new URL(targetOrigin)
   const secureUpstream = target.protocol === 'https:'
   const transport = secureUpstream ? https : http
   const AgentClass = secureUpstream ? https.Agent : http.Agent
   const upstreamAgent = new AgentClass({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 })
+  const exchanges = new Set<http.ClientRequest>()
 
   /** One GET / with the launch token; the response carries the harness cookie. */
   function exchangeHarnessCookie(): Promise<string> {
     const url = new URL(authenticatedUrl(targetOrigin + '/'))
     return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (error: Error | undefined, cookie?: string): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        exchanges.delete(req)
+        if (error) reject(error)
+        else resolve(cookie!)
+      }
       const req = transport.request({
         host: connectHost(url.hostname),
         port: Number(url.port) || (secureUpstream ? 443 : 80),
@@ -83,10 +95,12 @@ export function createProxy(options: ProxyOptions): Proxy {
         res.resume()
         const lines = res.headers['set-cookie'] || []
         const cookie = lines.map((line) => line.split(';')[0]).filter(Boolean).join('; ')
-        if (!cookie) reject(new Error('launch-token exchange returned ' + res.statusCode + ' without set-cookie'))
-        else resolve(cookie)
+        if (!cookie) finish(new Error('launch-token exchange returned ' + res.statusCode + ' without set-cookie'))
+        else finish(undefined, cookie)
       })
-      req.on('error', reject)
+      const timer = setTimeout(() => req.destroy(new Error('launch-token exchange timed out')), exchangeTimeoutMs)
+      exchanges.add(req)
+      req.on('error', (err) => finish(err))
       req.end()
     })
   }
@@ -98,15 +112,17 @@ export function createProxy(options: ProxyOptions): Proxy {
   function harnessCookie(): Promise<string> {
     if (harnessCache.value && Date.now() - harnessCache.at < HARNESS_COOKIE_TTL) return Promise.resolve(harnessCache.value)
     if (harnessInflight) return harnessInflight
-    harnessInflight = (async () => {
-      try {
-        const cookie = await exchangeHarnessCookie()
+    // Start in a microtask so synchronous URL/request errors cannot leave a
+    // rejected promise cached after its cleanup has already run.
+    harnessInflight = Promise.resolve()
+      .then(exchangeHarnessCookie)
+      .then((cookie) => {
         harnessCache = { value: cookie, at: Date.now() }
         return cookie
-      } finally {
+      })
+      .finally(() => {
         harnessInflight = null
-      }
-    })()
+      })
     return harnessInflight
   }
 
@@ -221,6 +237,9 @@ export function createProxy(options: ProxyOptions): Proxy {
     harnessCookie,
     forward,
     forwardUpgrade,
-    destroy: () => upstreamAgent.destroy(),
+    destroy: () => {
+      for (const request of exchanges) request.destroy(new Error('proxy stopped'))
+      upstreamAgent.destroy()
+    },
   }
 }

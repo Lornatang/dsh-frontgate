@@ -19,6 +19,8 @@ export interface ScryptParams {
 export declare function assertStrongPassword(password: string, source: string): string;
 /** Hash a password with scrypt; parameters travel with the hash. */
 export declare function hashPassword(password: string, params?: ScryptParams): string;
+/** Check the complete persisted format and its bounded scrypt parameters. */
+export declare function validPasswordHash(value: unknown): value is string;
 /** Async verification: the event loop stays free while scrypt runs. */
 export declare function verifyPassword(password: string, stored: unknown): Promise<boolean>;
 /** Synchronous verification, used only to reuse the persisted salt at startup. */
@@ -31,7 +33,7 @@ export declare const passwordVersion: (passwordHash: string) => string;
 export declare function signToken(secret: string, pv: string, ttlSeconds: number): string;
 /** Verify signature, version, password binding and expiry in constant time. */
 export declare function verifyToken(secret: string, pv: string, token: string | undefined): boolean;
-/** Session cookie attributes; Secure is only added when the gate serves TLS. */
+/** Session cookie attributes; Secure follows the browser-facing protocol. */
 export declare function sessionCookie(value: string, seconds: number, useTls: boolean): string;
 /** Expired session cookie. */
-export declare const clearCookie: () => string;
+export declare const clearCookie: (secure: boolean) => string;

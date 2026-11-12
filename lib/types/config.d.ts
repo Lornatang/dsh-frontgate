@@ -23,12 +23,16 @@ export interface Config {
     tlsCertFile: string;
     /** Optional TLS key; both files must be set to serve HTTPS. */
     tlsKeyFile: string;
-    /** Honour X-Forwarded-For and X-Forwarded-Proto from a proxy you control. */
+    /** Browser-facing origin, required when a reverse proxy terminates TLS. */
+    publicOrigin: string;
+    /** Honour X-Forwarded-For only when the listener is restricted to a trusted proxy. */
     trustProxy: boolean;
     /** Failed logins before a client is locked out. */
     maxAttempts: number;
     /** Lockout duration in minutes. */
     lockMinutes: number;
+    /** Maximum time to exchange the harness launch token, in milliseconds. */
+    exchangeTimeoutMs: number;
 }
 /** Defaults applied by the loader and by direct calls to apply(). */
 export declare const DEFAULTS: Config;

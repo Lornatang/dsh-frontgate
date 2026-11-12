@@ -24,12 +24,16 @@ export interface Config {
   tlsCertFile: string
   /** Optional TLS key; both files must be set to serve HTTPS. */
   tlsKeyFile: string
-  /** Honour X-Forwarded-For and X-Forwarded-Proto from a proxy you control. */
+  /** Browser-facing origin, required when a reverse proxy terminates TLS. */
+  publicOrigin: string
+  /** Honour X-Forwarded-For only when the listener is restricted to a trusted proxy. */
   trustProxy: boolean
   /** Failed logins before a client is locked out. */
   maxAttempts: number
   /** Lockout duration in minutes. */
   lockMinutes: number
+  /** Maximum time to exchange the harness launch token, in milliseconds. */
+  exchangeTimeoutMs: number
 }
 
 /** Defaults applied by the loader and by direct calls to apply(). */
@@ -42,9 +46,11 @@ export const DEFAULTS: Config = {
   passwordHash: '',
   tlsCertFile: '',
   tlsKeyFile: '',
+  publicOrigin: '',
   trustProxy: false,
   maxAttempts: 5,
   lockMinutes: 5,
+  exchangeTimeoutMs: 5000,
 }
 
 /** Schemastery schema; the loader validates and fills defaults before apply(). */
@@ -57,7 +63,9 @@ export const Config: z<Config> = z.object({
   passwordHash: z.string().default(DEFAULTS.passwordHash),
   tlsCertFile: z.string().default(DEFAULTS.tlsCertFile),
   tlsKeyFile: z.string().default(DEFAULTS.tlsKeyFile),
+  publicOrigin: z.string().default(DEFAULTS.publicOrigin),
   trustProxy: z.boolean().default(DEFAULTS.trustProxy),
   maxAttempts: z.natural().min(1).max(50).default(DEFAULTS.maxAttempts),
   lockMinutes: z.natural().min(1).max(1440).default(DEFAULTS.lockMinutes),
+  exchangeTimeoutMs: z.natural().min(100).max(60000).default(DEFAULTS.exchangeTimeoutMs),
 })

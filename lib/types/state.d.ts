@@ -4,11 +4,11 @@ export interface State {
     secret?: string;
     createdAt?: string;
 }
-/** Read state, treating a missing or malformed file as empty. */
-export declare function readState(path: string): State;
-/** Best effort chmod; a missing file or a read-only filesystem is ignored. */
-export declare function tightenState(path: string): void;
-/** Write state atomically enough for one process, owner-readable only. */
+/** Read existing state without replacing malformed or inaccessible credentials. */
+export declare function readState(path: string, mustExist?: boolean): State;
+/** Fail closed when a state file is a symlink or cannot be made owner-only. */
+export declare function tightenState(path: string): boolean;
+/** Write a complete owner-only temporary file, then replace the old state. */
 export declare function writeState(path: string, value: State): void;
 /** Resolve the state path for the profile the plugin was loaded from. */
 export declare function statePathFor(patchPath: string | undefined): string;

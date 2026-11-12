@@ -82,6 +82,11 @@ function parseStored(stored: unknown): { N: number; r: number; p: number; salt: 
   return { N, r, p, salt, want }
 }
 
+/** Check the complete persisted format and its bounded scrypt parameters. */
+export function validPasswordHash(value: unknown): value is string {
+  return typeof value === 'string' && HASH_RE.test(value) && parseStored(value) !== undefined
+}
+
 /** Async verification: the event loop stays free while scrypt runs. */
 export async function verifyPassword(password: string, stored: unknown): Promise<boolean> {
   const parsed = parseStored(stored)
@@ -147,7 +152,7 @@ export function verifyToken(secret: string, pv: string, token: string | undefine
   return got.length === want.length && timingSafeEqual(got, want)
 }
 
-/** Session cookie attributes; Secure is only added when the gate serves TLS. */
+/** Session cookie attributes; Secure follows the browser-facing protocol. */
 export function sessionCookie(value: string, seconds: number, useTls: boolean): string {
   const attrs = [COOKIE + '=' + value, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=' + seconds]
   if (useTls) attrs.push('Secure')
@@ -155,5 +160,4 @@ export function sessionCookie(value: string, seconds: number, useTls: boolean): 
 }
 
 /** Expired session cookie. */
-export const clearCookie = (): string =>
-  [COOKIE + '=', 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'].join('; ')
+export const clearCookie = (secure: boolean): string => sessionCookie('', 0, secure)

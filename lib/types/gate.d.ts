@@ -18,6 +18,8 @@ export interface GateRuntime {
     lockMs: number;
     trustProxy: boolean;
     useTls: boolean;
+    publicOrigin: string;
+    secureCookie: boolean;
 }
 /** Collaborators the handler delegates to. */
 export interface GateOptions {

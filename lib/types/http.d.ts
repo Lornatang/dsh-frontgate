@@ -15,17 +15,14 @@ export declare const intOr: (value: unknown, fallback: number, min: number, max:
 export declare function cookieValue(header: string | string[] | undefined, name: string): string;
 /** Client address used for lockout accounting. */
 export declare function clientIp(req: IncomingMessage, trustProxy: boolean): string;
-/** Hostname without the port, IPv6 brackets preserved. */
-export declare function hostnameOf(value: unknown): string;
-/**
- * True when the Origin header, if present, names the same authority as Host.
- *
- * The port is compared when the Host header carries one; a Host without a port
- * stays accepted so a TLS-terminating proxy that strips the port keeps working.
- */
-export declare function originMatchesHost(req: IncomingMessage): boolean;
+/** Normalize an explicitly configured, browser-facing HTTP(S) origin. */
+export declare function normalizePublicOrigin(value: string): string;
+/** The configured public authority must match the Host preserved by a proxy. */
+export declare const hostMatchesPublicOrigin: (req: IncomingMessage, publicOrigin: string, useTls: boolean) => boolean;
+/** Require a valid Host, and if present an Origin with identical scheme, host and port. */
+export declare function originMatchesHost(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean;
 /** Login check: Origin and Fetch-Site must both look same-origin. */
-export declare function sameOrigin(req: IncomingMessage): boolean;
+export declare function sameOrigin(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean;
 /** Only same-site absolute paths; rejects //evil and backslash tricks. */
 export declare function safeNext(value: unknown): string;
 export declare const escapeHtml: (text: unknown) => string;

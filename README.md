@@ -1,168 +1,189 @@
 # dsh-frontgate
 
-Password gate and reverse proxy for the DeepSeek Harness Web UI. Keep `dsh`
-bound to loopback and expose this plugin instead: unauthenticated visitors can
-reach neither the UI nor `/api`, and the proxy handles Host/Origin and the
-harness launch token, so no extra flags are needed on the `dsh` command line.
+Protect the DeepSeek Harness Web UI with a password. The plugin listens on a
+separate port and forwards authenticated requests to your local harness.
 
-## Features
+**Requirements:** Node.js 22.19 or later, DSH 0.2.2-rc.1 or later, and a DSH
+profile with the Web app.
 
-- Password login. Page requests are redirected to the login page; `/api/*`
-  returns 401. A configured password must be at least 12 characters.
-- Reverse proxy to the local harness. The launch token is exchanged on the
-  server and cached, so the browser only holds the gate session cookie.
-- Stateless sessions. Changing the password invalidates every issued session.
-  No session table and no background timers.
-- Async scrypt verification, per-IP lockout, and limits on concurrent checks,
-  form size, body read time, header/request deadlines and connection count.
-- Loopback only by default, optional native TLS, and a `crypto.randomUUID`
-  fallback for plain-HTTP pages.
+## Quick start
 
-## Install
+1. Install into the `web` profile:
 
-Requires Node >= 22.19 and DSH >= 0.2.2-rc.1.
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash
+   ```
 
-One command, which also creates the profile from the web template when it does
-not exist yet:
+   For another profile, add `-s -- --profile <name>` after `bash`.
+
+2. Restart the profile if it is already running. Otherwise, start it with:
+
+   ```bash
+   dsh web --no-open
+   ```
+
+   For another profile, replace `web` with its name.
+
+3. If no password is configured or saved, the first start prints this line to
+   stderr or your service's startup log:
+
+   ```text
+   [dsh-frontgate] PASSWORD: xxxx-xxxx-xxxx-xxxx
+   ```
+
+   Save the generated password; it is shown only once. The plugin saves its
+   hash, not the password itself.
+
+4. Open [http://127.0.0.1:3090](http://127.0.0.1:3090) and sign in. This is
+   the gate address, separate from the URL printed by `dsh web`.
+
+## Update
+
+Run the same install command for the same profile, then restart DSH. Existing
+configuration and the saved password remain in place; the password is not
+printed again. With `git` and GitHub access, the installer resolves the release
+tag to its current commit instead of using a cached archive.
+The installer follows the `v0.1.0` release tag; changes listed as Unreleased
+in the changelog are not included until a release is published.
+
+For offline installation, run `npm ci` and `npm pack` in a checkout on a
+connected machine, copy the resulting tarball to the DSH host, and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash
-```
-
-To install into another profile:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Lornatang/dsh-frontgate/main/install.sh | bash -s -- --profile <name>
-```
-
-Or install manually:
-
-```bash
-dsh plugin --profile <name> add github:Lornatang/dsh-frontgate#v0.1.0
-```
-
-Offline: on a machine with network access unpack a checkout and run
-`npm pack`, copy the tarball over, then:
-
-```bash
-dsh plugin --profile <name> add ./dsh-frontgate-0.1.0.tgz
+dsh plugin --profile web add /path/to/dsh-frontgate-0.1.0.tgz
 ```
 
 Restart the profile after installing.
 
-## Update an existing installation
+## Configure
 
-Run the same install command again, selecting the original profile if it is not
-`web`, then restart that profile. When `git` is available, the installer
-resolves the tag to its current commit so an updated tag does not reuse a
-cached archive. If it warns that the tag could not be resolved, install `git`,
-check GitHub connectivity, and rerun it.
-
-Updating keeps the profile configuration and the saved password hash. It does
-not generate or print a new password.
-
-## Quick start
-
-- The gate listens on `127.0.0.1:3090` and forwards to the local harness.
-- With no password configured or saved, the first start prints
-  `PASSWORD: xxxx-xxxx-xxxx-xxxx` to stderr and stores only its hash. Save it
-  then; it is not printed again. If stderr is redirected, find it in the
-  service's startup log.
-- Set a fixed password with the `password` or `passwordHash` option below.
-- Open `http://127.0.0.1:3090`.
-
-## Configuration
-
-Append to the profile's `cordis.patch.yml`:
+Edit `~/.dsh/profiles/<name>/cordis.patch.yml` for your profile. If `DSH_HOME`
+is set, use `$DSH_HOME/profiles/<name>/cordis.patch.yml` instead. Add or edit
+the existing `frontgate` entry, for example:
 
 ```yaml
 - id: frontgate
   config:
-    listenHost: '0.0.0.0'
-    listenPort: 30010
-    password: 'change-me-now'
+    listenHost: '0.0.0.0' # allow connections from outside the container
+    listenPort: 3090
+    # password: 'replace-with-a-password-of-at-least-12-characters'
 ```
 
-| Option | Default | Description |
+Restart the profile after changing its configuration. Omit `listenHost` to
+keep the loopback-only default. The gate port must differ from the harness
+port.
+
+| Option | Default | Purpose |
 | --- | --- | --- |
-| `listenHost` | `'127.0.0.1'` | Listen address. Use `'0.0.0.0'` for remote access. |
-| `listenPort` | `3090` | Listen port. Must differ from the harness port. |
-| `sessionDays` | `7` | Session lifetime in days (1 to 365). |
-| `title` | `'DeepSeek Harness'` | Login page title. |
-| `password` | `''` | Plain-text password (at least 12 characters), hashed at startup and not written to disk. |
-| `passwordHash` | `''` | `scrypt$...` hash. Takes precedence over `password`. |
-| `maxAttempts` / `lockMinutes` | `5` / `5` | Failed logins per client before answers become 429, and the window. |
-| `tlsCertFile` / `tlsKeyFile` | `''` | Set both to serve HTTPS. |
-| `trustProxy` | `false` | Trust `X-Forwarded-*` from your reverse proxy. |
+| `listenHost` | `127.0.0.1` | Address the gate listens on. |
+| `listenPort` | `3090` | Gate port. |
+| `password` | empty | Fixed password, at least 12 characters. |
+| `passwordHash` | empty | A `scrypt$...` hash; takes precedence over `password`. |
+| `sessionDays` | `7` | Session lifetime, from 1 to 365 days. |
+| `title` | `DeepSeek Harness` | Login page title. |
+| `maxAttempts` / `lockMinutes` | `5` / `5` | Failed-attempt threshold and lockout duration per client IP. |
+| `tlsCertFile` / `tlsKeyFile` | empty | Set both to serve HTTPS directly. |
+| `publicOrigin` | empty | External origin, such as `https://gate.example.com`; required when a proxy terminates HTTPS. |
+| `trustProxy` | `false` | Use forwarded client IPs behind a trusted proxy. |
+| `exchangeTimeoutMs` | `5000` | Timeout for exchanging the harness launch token, in milliseconds. |
 
-`DSH_FRONTGATE_PASSWORD` and `DSH_FRONTGATE_PASSWORD_HASH` are read when the
-config sets neither, which keeps the password out of the patch file. The
-12-character minimum applies to `DSH_FRONTGATE_PASSWORD` as well; a shorter
-value stops startup with an explicit error.
+When neither password option is set, the DSH process checks
+`DSH_FRONTGATE_PASSWORD_HASH`, then `DSH_FRONTGATE_PASSWORD`, then the saved
+hash. If none is available, it generates a password. The 12-character minimum
+also applies to `DSH_FRONTGATE_PASSWORD`.
 
-The state file `<profile>/data/dsh-frontgate.json` (mode 0600) stores the
-password hash and the session signing secret. Deleting it invalidates every
-issued session.
+## Docker and remote access
 
-## Remote and Docker deployment
+For a container, set `listenHost: '0.0.0.0'` as above and publish the gate
+port. For example, this Docker Compose service fragment maps host port 30190
+to gate port 3090 inside the container:
 
-- In a container set `listenHost` to `'0.0.0.0'` and `listenPort` to the port
-  mapped from the host. Map only that port, not the harness port.
-- Plain HTTP exposes the password and the session cookie to anyone on the path.
-  Use it only on a trusted LAN or VPN. For anything else enable
-  `tlsCertFile`/`tlsKeyFile`, or terminate TLS in Caddy or Nginx and set
-  `trustProxy: true`.
-- If `dsh` listens on a non-loopback address the log warns that the gate can
-  be bypassed. Keep it on `127.0.0.1`.
+```yaml
+ports:
+  - '30190:3090'
+```
 
-## Security notes
+Then open `http://<host-ip>:30190`. Changing the published port requires
+updating the container configuration; changing `listenPort` requires updating
+the container-side port in the mapping too.
 
-- Session cookies are HMAC-SHA256 signed with a random 32-byte secret kept in
-  the state file; the secret is not derived from the password hash.
-- Requests whose `Origin` names another site are refused with 403 before they
-  reach the harness; WebSocket handshakes get the same check.
-- Repeated failures from one client answer 429 with `Retry-After`, but a
-  correct password is still verified and accepted. One client therefore cannot
-  lock out every user behind a shared address. Guessing throughput is bounded
-  by the scrypt cost and the scrypt concurrency cap.
-- Secret comparisons are constant-time; the state file holds the scrypt hash and
-  the signing secret, never the password, and is chmod 0600 on startup.
-- The login page has no scripts and sends CSP, `no-store`, a `same-origin`
-  referrer policy and `X-Frame-Options`. The referrer policy keeps cross-origin
-  referrers private while allowing the browser to send the form's `Origin`.
-- The proxy target is fixed to the local harness and never taken from user
-  input; upstream `Set-Cookie` headers are stripped. Upstream redirects that
-  would leave this origin (protocol-relative or backslash forms) become `/`.
-- The listener closes clients that do not finish headers within 10 seconds or a
-  request within 30 seconds, and accepts at most 1024 concurrent connections.
-- With TLS enabled, gate responses also send HSTS.
+Keep the harness itself bound to `127.0.0.1` and expose only the gate port;
+otherwise clients can bypass the password. Plain HTTP exposes passwords and
+cookies on the network, so use it only on a trusted LAN or VPN. For other
+networks, enable the TLS options or terminate TLS with a trusted reverse proxy.
 
-Known limits: one password for everyone, no multi-user accounts, no way to
-revoke a single session, and no admin page. Configuration changes need a patch
-edit and a restart.
+**Use a dedicated hostname or IP for the gate.** Browser cookies are shared by
+all ports on the same hostname or IP. For IP access such as
+`http://192.168.30.211:30190`, do not host untrusted Web services on any other
+port of that IP: they could receive and reuse the gate session cookie. HTTPS
+does not isolate cookies between HTTPS ports.
 
-## Project layout
+For an HTTPS reverse proxy, configure the browser-facing origin, including a
+non-default port if present:
 
-The plugin follows the layout of the packages shipped with the harness:
+```yaml
+- id: frontgate
+  config:
+    publicOrigin: 'https://gate.example.com'
+    trustProxy: true
+```
 
-| Path | Purpose |
-| --- | --- |
-| `src/` | TypeScript sources. Each module owns one concern: config, auth, proxy, gate handler, login page. |
-| `lib/` | Build output: the bundled `index.js` and the generated `.d.ts` files. |
-| `tests/` | End-to-end tests that run against the built bundle. |
-| `scripts/build.mjs` | esbuild bundle plus `tsc` declaration emit. |
-| `cordis.patch.yml` | Bundle patch that inserts the plugin into a profile. |
+The proxy must preserve the original `Host` header, including any non-default
+port (for Nginx, `proxy_set_header Host $http_host;`). Restrict direct access
+to the gate listener so only your trusted proxy can reach it. When `trustProxy`
+is enabled, the proxy must replace any client-supplied `X-Forwarded-For` with
+the actual client IP, for example with this Nginx directive:
+`proxy_set_header X-Forwarded-For $remote_addr;`. The plugin then sets
+`Secure` on its session cookie. Configure
+HSTS at the proxy if needed. Direct HTTPS with `tlsCertFile` and `tlsKeyFile`
+does not require `publicOrigin`.
+
+After `maxAttempts` failures, all login attempts from that IP are rejected for
+`lockMinutes`, including attempts with the correct password. Clients behind the
+same NAT may share a lockout. Lockouts are stored in memory and reset when DSH
+restarts.
+
+## Troubleshooting
+
+- **No password in the latest startup log:** An existing password hash or a
+  configured password is reused. To set a new one, configure `password` and
+  restart; remove any configured `passwordHash` first because it takes
+  precedence. Changing the password invalidates existing sessions.
+- **Cannot connect remotely:** Check the gate's `listening on` log line,
+  `listenHost`, and the Docker port mapping. The host port and container port
+  can differ.
+- **Need to sign out:** Visit `/__gate/logout` on the gate address.
+- **State file error:** Restore the file from a trusted backup, check that it
+  is owned by the DSH service user and has mode `0600`, then restart. If no
+  backup exists, stop DSH and move the broken file aside before restarting;
+  a new signing secret will be generated, invalidating sessions. If no
+  password is configured, a new password will also be generated.
+- **Origin or host check fails behind a proxy:** Check `publicOrigin` and make
+  sure the proxy preserves the browser's `Host` header, including its port.
+
+The state file `~/.dsh/profiles/<name>/data/dsh-frontgate.json` stores the
+password hash and session-signing secret. With `DSH_HOME` set, it is under
+`$DSH_HOME/profiles/<name>/data/` instead. Everyone shares one password; there
+are no individual accounts or per-session revocation. Deleting the state file
+invalidates all sessions. On Windows, restrict access to the state file and its
+parent directory with operating-system ACLs; POSIX mode checks cannot verify
+Windows ACLs. Keep the profile and state directories writable only by trusted
+users; a user who can replace the state file or its parent directory can
+compromise sessions.
 
 ## Development
 
 ```bash
-npm ci            # install the pinned dev dependencies (package-lock.json)
-npm run typecheck # tsc --noEmit over src/
-npm test          # build, then node --test tests/*.test.mjs
-npm run build     # regenerate lib/index.js and lib/types/
-npm pack          # prepack rebuilds and reruns the tests
+npm ci
+npm run typecheck
+npm test
 ```
+
+Sources are in `src/`; `npm run build` regenerates the bundled files in `lib/`.
+The browser tests use Chrome and OpenSSL. Set `CHROME_PATH` if Chrome is not
+at a standard location. They are required in CI and skipped locally when
+Chrome is unavailable.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE)

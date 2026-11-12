@@ -10,7 +10,7 @@ import {
   COOKIE, clearCookie, passwordVersion, sessionCookie, signToken, verifyPassword, verifyToken,
 } from './auth.ts'
 import {
-  MAX_FORM, clientIp, cookieValue, html, json, originMatchesHost, readForm, redirect, safeNext,
+  MAX_FORM, clientIp, cookieValue, hostMatchesPublicOrigin, html, json, readForm, redirect, safeNext,
   sameOrigin, text,
 } from './http.ts'
 import { loginPage } from './page.ts'
@@ -32,6 +32,8 @@ export interface GateRuntime {
   lockMs: number
   trustProxy: boolean
   useTls: boolean
+  publicOrigin: string
+  secureCookie: boolean
 }
 
 /** Collaborators the handler delegates to. */
@@ -50,10 +52,11 @@ interface Failure {
 /** Build the request handler for one gate instance. */
 export function createHandler(options: GateOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const { runtime, harnessCookie, forward, log } = options
-  const { title, passwordHash, secret, pv, sessionSeconds, maxAttempts, lockMs, trustProxy, useTls } = runtime
+  const { title, passwordHash, secret, pv, sessionSeconds, maxAttempts, lockMs, trustProxy, useTls, publicOrigin, secureCookie } = runtime
 
   // Login throttling: per-client lockout plus a global scrypt slot limit.
   const failures = new Map<string, Failure>()
+  const clientsInFlight = new Set<string>()
   let checksInFlight = 0
 
   function lockRemaining(ip: string): number {
@@ -89,10 +92,15 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
   async function handleLogin(req: IncomingMessage, res: ServerResponse, search: string): Promise<void> {
     const next = safeNext(new URLSearchParams(search).get('next') || '/')
     if (req.method === 'POST') {
-      if (!sameOrigin(req)) return html(res, 403, loginPage(title, next, 'Origin check failed.'))
+      if (!sameOrigin(req, publicOrigin, useTls)) return html(res, 403, loginPage(title, next, 'Origin check failed.'))
       const declared = Number(req.headers['content-length'] || 0)
       if (declared > MAX_FORM) return text(res, 413, 'request body too large\n')
       const ip = clientIp(req, trustProxy)
+      const wait = lockRemaining(ip)
+      if (wait > 0) {
+        req.resume()
+        return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
+      }
       let form: string
       try {
         form = await readForm(req)
@@ -100,30 +108,28 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
         if ((err as Error).message === 'too large') return text(res, 413, 'request body too large\n')
         return text(res, 400, 'bad request\n')
       }
-      if (checksInFlight >= CHECK_CONCURRENCY) return text(res, 429, 'busy, retry shortly\n', { 'retry-after': '1' })
+      const remaining = lockRemaining(ip)
+      if (remaining > 0) return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(remaining / 1000)) })
+      if (clientsInFlight.has(ip) || checksInFlight >= CHECK_CONCURRENCY) {
+        return text(res, 429, 'busy, retry shortly\n', { 'retry-after': '1' })
+      }
+      clientsInFlight.add(ip)
       checksInFlight += 1
       let ok = false
       try {
         ok = await verifyPassword(new URLSearchParams(form).get('password') || '', passwordHash)
       } finally {
         checksInFlight -= 1
+        clientsInFlight.delete(ip)
       }
       if (!ok) {
-        // A correct password is always verified and accepted. The lockout only
-        // changes the response for failures, so a shared address (Docker NAT)
-        // cannot be locked out by one client.
-        const locked = lockRemaining(ip) > 0
         recordFailure(ip)
         log.info('login failed from ' + ip)
-        if (locked) {
-          const wait = lockRemaining(ip)
-          return text(res, 429, 'too many attempts\n', { 'retry-after': String(Math.ceil(wait / 1000)) })
-        }
         return html(res, 401, loginPage(title, next, 'Wrong password.'))
       }
       failures.delete(ip)
       log.info('login from ' + ip)
-      res.setHeader('set-cookie', sessionCookie(signToken(secret, pv, sessionSeconds), sessionSeconds, useTls))
+      res.setHeader('set-cookie', sessionCookie(signToken(secret, pv, sessionSeconds), sessionSeconds, secureCookie))
       return redirect(res, next, 303)
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -142,9 +148,11 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
     const search = queryAt === -1 ? '' : raw.slice(queryAt)
 
     if (path === '/__gate/health') return json(res, 200, { ok: true, service: 'dsh-frontgate' })
+    if (!hostMatchesPublicOrigin(req, publicOrigin, useTls)) return text(res, 403, 'invalid host\n')
     if (path === '/__gate/login') return handleLogin(req, res, search)
     if (path === '/__gate/logout') {
-      res.setHeader('set-cookie', clearCookie())
+      if (!sameOrigin(req, publicOrigin, useTls)) return text(res, 403, 'forbidden\n')
+      res.setHeader('set-cookie', clearCookie(secureCookie))
       return redirect(res, '/__gate/login')
     }
     if (path.startsWith('/__gate/')) return text(res, 404, 'not found\n')
@@ -156,7 +164,7 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
       return redirect(res, '/__gate/login?next=' + encodeURIComponent(raw))
     }
 
-    if (!originMatchesHost(req)) {
+    if (!sameOrigin(req, publicOrigin, useTls)) {
       log.warn('cross-origin request blocked: ' + String(req.method) + ' ' + path)
       if (path === '/api' || path.startsWith('/api/')) return json(res, 403, { error: 'forbidden' })
       return text(res, 403, 'forbidden\n')

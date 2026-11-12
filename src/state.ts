@@ -4,10 +4,11 @@
  * The file sits next to the profile's cordis.patch.yml, is created with mode
  * 0600 and holds no plain-text password.
  */
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { hashPassword, verifyPasswordSync } from './auth.ts'
+import { hashPassword, validPasswordHash, verifyPasswordSync } from './auth.ts'
 
 /** Persisted state file contents. */
 export interface State {
@@ -16,30 +17,81 @@ export interface State {
   createdAt?: string
 }
 
-/** Read state, treating a missing or malformed file as empty. */
-export function readState(path: string): State {
+/** Read existing state without replacing malformed or inaccessible credentials. */
+export function readState(path: string, mustExist = false): State {
+  let data: string
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    return value && typeof value === 'object' ? (value as State) : {}
-  } catch {
-    return {}
+    data = readFileSync(path, 'utf8')
+  } catch (err) {
+    if (!mustExist && (err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw new Error('dsh-frontgate: cannot read state file ' + path, { cause: err })
+  }
+  try {
+    const value: unknown = JSON.parse(data)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid state')
+    const state = value as State
+    if (!validPasswordHash(state.passwordHash) || typeof state.secret !== 'string' || state.secret.length < 64) {
+      throw new Error('invalid credentials')
+    }
+    return state
+  } catch (err) {
+    throw new Error('dsh-frontgate: invalid state file ' + path + '; restore it from a backup before restarting', { cause: err })
   }
 }
 
-/** Best effort chmod; a missing file or a read-only filesystem is ignored. */
-export function tightenState(path: string): void {
+/** Fail closed when a state file is a symlink or cannot be made owner-only. */
+export function tightenState(path: string): boolean {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw new Error('dsh-frontgate: cannot inspect state file ' + path, { cause: err })
+  }
+  if (!info.isFile()) throw new Error('dsh-frontgate: state file must be a regular file: ' + path)
+  // Windows does not expose POSIX permissions through chmod; its ACLs must be
+  // managed by the operator. On POSIX, verify even if chmod itself fails.
+  if (process.platform === 'win32') return true
+  if (typeof process.geteuid === 'function' && info.uid !== process.geteuid()) {
+    throw new Error('dsh-frontgate: state file must be owned by the service user: ' + path)
+  }
   try {
     chmodSync(path, 0o600)
-  } catch {
-    // Nothing to tighten.
+  } catch (err) {
+    if ((info.mode & 0o077) !== 0) {
+      throw new Error('dsh-frontgate: cannot secure state file permissions for ' + path, { cause: err })
+    }
   }
+  try {
+    info = lstatSync(path)
+  } catch (err) {
+    throw new Error('dsh-frontgate: cannot inspect state file ' + path, { cause: err })
+  }
+  if (!info.isFile() || (info.mode & 0o077) !== 0 ||
+      (typeof process.geteuid === 'function' && info.uid !== process.geteuid())) {
+    throw new Error('dsh-frontgate: state file must be owner-only: ' + path)
+  }
+  return true
 }
 
-/** Write state atomically enough for one process, owner-readable only. */
+/** Write a complete owner-only temporary file, then replace the old state. */
 export function writeState(path: string, value: State): void {
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
-  tightenState(path)
+  const temporary = path + '.' + randomBytes(12).toString('hex') + '.tmp'
+  let fd: number | undefined
+  try {
+    fd = openSync(temporary, 'wx', 0o600)
+    writeFileSync(fd, JSON.stringify(value, null, 2) + '\n')
+    fsyncSync(fd)
+    closeSync(fd)
+    fd = undefined
+    renameSync(temporary, path)
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+    try { unlinkSync(temporary) } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    }
+  }
 }
 
 /** Resolve the state path for the profile the plugin was loaded from. */

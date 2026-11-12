@@ -36,54 +36,57 @@ export function clientIp(req: IncomingMessage, trustProxy: boolean): string {
   return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '') || 'unknown'
 }
 
-/** Hostname without the port, IPv6 brackets preserved. */
-export function hostnameOf(value: unknown): string {
-  const host = String(value || '').trim().toLowerCase()
-  if (host.startsWith('[')) {
-    const end = host.indexOf(']')
-    return end === -1 ? host : host.slice(0, end + 1)
+/** Normalize an explicitly configured, browser-facing HTTP(S) origin. */
+export function normalizePublicOrigin(value: string): string {
+  if (!value) return ''
+  try {
+    const url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+        url.pathname !== '/' || url.search || url.hash) throw new Error('invalid origin')
+    return url.origin
+  } catch {
+    throw new Error('dsh-frontgate: publicOrigin must be an HTTP(S) origin without a path, query, or credentials')
   }
-  return host.split(':')[0] ?? host
 }
 
-/** Port carried by a host[:port] authority, or '' when it has none. */
-function explicitPort(authority: string): string {
-  if (authority.startsWith('[')) {
-    const end = authority.indexOf(']')
-    if (end === -1) return ''
-    const rest = authority.slice(end + 1)
-    return rest.startsWith(':') ? rest.slice(1) : ''
+/** Resolve the actual Host authority using a configured or native protocol. */
+function requestOrigin(req: IncomingMessage, publicOrigin: string, useTls: boolean): string | undefined {
+  const host = req.headers.host
+  if (typeof host !== 'string' || !host || /[\s/@?#\\]/.test(host)) return undefined
+  try {
+    const protocol = publicOrigin ? new URL(publicOrigin).protocol : useTls ? 'https:' : 'http:'
+    const url = new URL(protocol + '//' + host)
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return undefined
+    if (publicOrigin && url.origin !== publicOrigin) return undefined
+    return url.origin
+  } catch {
+    return undefined
   }
-  const at = authority.lastIndexOf(':')
-  return at === -1 ? '' : authority.slice(at + 1)
 }
 
-/**
- * True when the Origin header, if present, names the same authority as Host.
- *
- * The port is compared when the Host header carries one; a Host without a port
- * stays accepted so a TLS-terminating proxy that strips the port keeps working.
- */
-export function originMatchesHost(req: IncomingMessage): boolean {
+/** The configured public authority must match the Host preserved by a proxy. */
+export const hostMatchesPublicOrigin = (req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean =>
+  requestOrigin(req, publicOrigin, useTls) !== undefined
+
+/** Require a valid Host, and if present an Origin with identical scheme, host and port. */
+export function originMatchesHost(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean {
+  const expected = requestOrigin(req, publicOrigin, useTls)
+  if (!expected) return false
   const origin = req.headers.origin
   if (origin === undefined) return true
   try {
     const url = new URL(origin)
-    const host = String(req.headers.host || '').trim().toLowerCase()
-    if (url.hostname.toLowerCase() !== hostnameOf(host)) return false
-    const port = url.port || (url.protocol === 'https:' ? '443' : '80')
-    const declared = explicitPort(host)
-    return declared === '' || declared === port
+    return origin === url.origin && url.origin === expected
   } catch {
     return false
   }
 }
 
 /** Login check: Origin and Fetch-Site must both look same-origin. */
-export function sameOrigin(req: IncomingMessage): boolean {
+export function sameOrigin(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean {
   const site = req.headers['sec-fetch-site']
   if (site !== undefined && site !== 'same-origin' && site !== 'none') return false
-  return originMatchesHost(req)
+  return originMatchesHost(req, publicOrigin, useTls)
 }
 
 /** Only same-site absolute paths; rejects //evil and backslash tricks. */

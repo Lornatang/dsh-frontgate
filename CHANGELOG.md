@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Compare the full browser-facing origin, including scheme and port, for login,
+  authenticated requests and WebSockets. Configure `publicOrigin` when HTTPS
+  is terminated by a reverse proxy; it also enables Secure session cookies.
+- Enforce per-client login lockouts before password verification, and limit
+  concurrent password checks from one client.
+- Refuse malformed, exposed or incorrectly owned state files instead of
+  silently replacing credentials; persist state through an atomic replacement.
+- Bound the harness launch-token exchange and retry on later requests after a
+  timeout.
+- Add browser and security regression tests to CI. Document the requirement
+  for a dedicated hostname or IP because browser cookies are shared by ports.
+
 ## 0.1.0 - 2026-11-10
 
 First release.
