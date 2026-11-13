@@ -169,17 +169,4 @@ module must be enabled; some Node versions report an experimental warning.
 Expired revocations are removed on sign-out, and a full or unwritable
 revocation store makes sign-out fail safely.
 
-## Development
-
-```bash
-npm ci
-npm run typecheck
-npm test
-```
-
-Browser tests require Chrome and OpenSSL; set `CHROME_PATH` if needed. They are
-required in CI and skipped locally when Chrome is unavailable.
-CI also checks login and WebSocket connectivity against DSH 0.2.2-rc.2 in an
-isolated profile.
-
 [Apache-2.0](LICENSE)

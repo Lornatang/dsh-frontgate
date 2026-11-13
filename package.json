@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-frontgate",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Password protection and reverse proxy for the DeepSeek Harness Web UI.",
   "type": "module",
   "main": "lib/index.js",
