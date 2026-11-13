@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6 - 2026-11-13
+
+- Allow any DSH version in the package metadata and run integration checks against the selected host.
+- Keep the installer aligned with this release and make the lockout-capacity test independent of machine speed.
+
 ## 0.1.5 - 2026-11-13
 
 - Keep the README focused on installation and everyday use.

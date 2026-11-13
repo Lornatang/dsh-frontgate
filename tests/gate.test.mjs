@@ -638,6 +638,8 @@ test('concurrent login attempts from one client cannot bypass the lockout', asyn
 })
 
 test('a full failure store preserves existing lockouts and recovers when they expire', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
   const { gate } = await withGate(t, {
     passwordHash: hashPassword(PASSWORD, { N: 1024 }), maxAttempts: 1, lockMinutes: 1, trustProxy: true,
   })
@@ -653,8 +655,7 @@ test('a full failure store preserves existing lockouts and recovers when they ex
   assert.deepEqual(concurrent.map(result => result.res.status).sort((a, b) => a - b), [401, 429])
   assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.1' })).res.status, 429)
   assert.equal((await login(gate.port, PASSWORD, '/', original)).res.status, 429)
-  const now = Date.now()
-  t.mock.method(Date, 'now', () => now + 61000)
+  now += 61000
   assert.equal((await login(gate.port, PASSWORD, '/', original)).res.status, 303)
   assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.1' })).res.status, 303)
 })

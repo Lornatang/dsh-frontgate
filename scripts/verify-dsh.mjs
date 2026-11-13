@@ -25,7 +25,8 @@ let server
 let output = ''
 try {
   mkdirSync(home, { recursive: true })
-  assert.equal(execFileSync(dsh, ['--version'], { env, cwd: temp, encoding: 'utf8' }).trim(), '0.2.2-rc.2')
+  const version = execFileSync(dsh, ['--version'], { env, cwd: temp, encoding: 'utf8' }).trim()
+  assert.ok(version, 'DSH did not report its version')
   const packed = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], {
     cwd: root, encoding: 'utf8',
   }))[0]
@@ -101,7 +102,7 @@ try {
   assert.equal(logout.headers.get('clear-site-data'), '"cache"')
   const revokedFile = await fetch(file.url, { headers: { cookie }, signal: AbortSignal.timeout(10000) })
   assert.equal(revokedFile.status, 401)
-  process.stdout.write('DSH 0.2.2-rc.2 login, file cache, logout and idle WebSocket checks passed.\n')
+  process.stdout.write(`DSH ${version} login, file cache, logout and idle WebSocket checks passed.\n`)
 } catch (error) {
   // Never print the launch URL or generated credentials on a failed run.
   const safe = output.split('\n').filter((line) => line.startsWith('[dsh-frontgate]') && !line.includes('PASSWORD:'))

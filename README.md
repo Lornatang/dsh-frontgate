@@ -3,7 +3,7 @@
 Password protection for the DeepSeek Harness Web UI. The gate listens on its
 own port and forwards authenticated traffic to the local harness.
 
-**Requires:** Node.js 22.19+, DSH 0.2.2-rc.1+, and a Web profile.
+**Requires:** Node.js 22.19+ and a DSH Web profile.
 
 ## Install
 
