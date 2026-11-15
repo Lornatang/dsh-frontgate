@@ -1,13 +1,17 @@
 import { build } from 'esbuild'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = new URL('..', import.meta.url)
-rmSync(new URL('lib', root), { recursive: true, force: true })
+const root = fileURLToPath(new URL('..', import.meta.url))
+const resolve = (path) => join(root, path)
+
+rmSync(resolve('lib'), { recursive: true, force: true })
 
 await build({
-  entryPoints: [new URL('src/index.ts', root).pathname],
-  outfile: new URL('lib/index.js', root).pathname,
+  entryPoints: [resolve('src/index.ts')],
+  outfile: resolve('lib/index.js'),
   bundle: true,
   format: 'esm',
   platform: 'node',
@@ -18,5 +22,5 @@ await build({
   logLevel: 'warning',
 })
 
-mkdirSync(new URL('lib/types', root), { recursive: true })
-execFileSync('tsc', ['-p', new URL('tsconfig.json', root).pathname], { stdio: 'inherit', cwd: new URL('..', root).pathname })
+mkdirSync(resolve('lib/types'), { recursive: true })
+execFileSync(process.execPath, [resolve('node_modules/typescript/bin/tsc'), '-p', resolve('tsconfig.json')], { stdio: 'inherit', cwd: root })
