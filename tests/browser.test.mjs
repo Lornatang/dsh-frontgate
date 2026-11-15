@@ -133,10 +133,22 @@ async function startBrowser(dir) {
         return result.result.value
       },
       async submit(expression) { const done = loaded(); await send('Runtime.evaluate', { expression }); await wait(done) },
-      async close() { socket.close(); await stopChrome() },
+      async close() {
+        // Ask the browser to shut down its subprocesses before removing the
+        // profile. Killing only the parent can leave writers recreating files.
+        if (chrome.exitCode === null && chrome.signalCode === null && socket.readyState === WebSocket.OPEN) {
+          const exited = new Promise((resolve) => chrome.once('exit', resolve))
+          socket.send(JSON.stringify({ id: ++id, method: 'Browser.close' }))
+          await Promise.race([exited, delay(3000, undefined, { ref: false })])
+        }
+        socket.close()
+        await stopChrome()
+        await delay(250)
+      },
     }
   } catch (error) {
     await stopChrome()
+    await delay(250)
     throw error
   }
 }
