@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9 - 2026-11-15
+
+- Close test gates before removing their state directories and exercise the correct Windows and POSIX permission behavior.
+- Use a test-only TLS fixture and locate Chrome and Bash on Windows; test the installer without false-positive process failures.
+- Run the complete test suite on Windows with Node.js 22 and 24 in CI.
+- Publish this release on GitHub only; npm is not updated.
+
 ## 0.1.8 - 2026-11-15
 
 - Validate the browser-facing Host against the listener or configured public origin, including WebSocket upgrades.

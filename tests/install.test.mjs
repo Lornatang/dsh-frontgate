@@ -1,13 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const root = new URL('..', import.meta.url)
 const manifest = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'))
 const packageRef = `https://github.com/Lornatang/dsh-frontgate/releases/download/v${manifest.version}/lornatang-dsh-frontgate-${manifest.version}.tgz`
+const bash = process.env.BASH_PATH || (process.platform === 'win32'
+  ? [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean)
+    .map((base) => join(base, 'Git', 'bin', 'bash.exe')).find(existsSync) || 'bash'
+  : 'bash')
 
 test('the DSH bundle loads the published package name', () => {
   const patch = readFileSync(new URL('cordis.patch.yml', root), 'utf8')
@@ -43,10 +48,14 @@ function installer(t) {
   return {
     dshHome,
     calls: () => readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse),
-    run: (args = [], env = {}) => spawnSync('bash', [new URL('../install.sh', import.meta.url).pathname, ...args], {
-      encoding: 'utf8',
-      env: { ...process.env, PATH: bin + ':' + process.env.PATH, DSH_HOME: dshHome, DSH_FRONTGATE_PROFILE: 'web', TEST_CALLS: calls, ...env },
-    }),
+    run: (args = [], env = {}) => {
+      const result = spawnSync(bash, [fileURLToPath(new URL('../install.sh', import.meta.url)), ...args], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: bin + delimiter + process.env.PATH, DSH_HOME: dshHome, DSH_FRONTGATE_PROFILE: 'web', TEST_CALLS: calls, ...env },
+      })
+      if (result.error) throw result.error
+      return result
+    },
   }
 }
 
@@ -113,7 +122,15 @@ test('installer returns failure when DSH cannot install the archive', (t) => {
 
 test('invalid profile arguments are refused', (t) => {
   const setup = installer(t)
-  for (const args of [['--profile'], ['--profile', '../outside'], ['--profile', '..'], ['--profile', '--help'], ['--unknown']]) {
-    assert.notEqual(setup.run(args).status, 0)
+  for (const [args, message] of [
+    [['--profile'], /--profile needs a value/],
+    [['--profile', '../outside'], /invalid profile name/],
+    [['--profile', '..'], /invalid profile name/],
+    [['--profile', '--help'], /invalid profile name/],
+    [['--unknown'], /unknown argument/],
+  ]) {
+    const result = setup.run(args)
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, message)
   }
 })

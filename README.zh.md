@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-安装仅发布到 GitHub 的 0.1.8 版本，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.8/lornatang-dsh-frontgate-0.1.8.tgz`，或运行本版本的 `install.sh`。npm 仓库中的版本可能较旧。
+安装仅发布到 GitHub 的 0.1.9 版本，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.9/lornatang-dsh-frontgate-0.1.9.tgz`，或运行本版本的 `install.sh`。npm 仓库中的版本可能较旧。
 
 `add` 会把这一层组合进 profile：它的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `frontgate`，其 `config` 以下面的回环默认值为起点。清单中没有 `dsh.bundle.patch` 声明的包会在这一步失败，而不是静默地什么都不挂载。安装后重启 DSH，再打开 <http://127.0.0.1:3090> 登录。
 
@@ -99,7 +99,7 @@ loader 会按 `src/config.ts` 校验每个字段，非法值在启动时直接�
 
 会话有效期固定为 `sessionDays`，不因活跃而延长。Cookie 名为 `dsh_gate`，带 `HttpOnly`、`SameSite=Lax`，当公共 origin 是 HTTPS 时还会带 `Secure`。`/__gate/logout` 会吊销会话、关闭该会话的 HTTP 流与 WebSocket，并用 `Clear-Site-Data` 请求浏览器清理缓存内容；其他会话保持连接。吊销记录在重启后依然有效。
 
-状态位于 `$DSH_HOME/profiles/<name>/data/dsh-frontgate.json`，权限会被收紧为 `0600`。每个 profile 只允许一个门禁实例，由同目录下基于 SQLite 的操作系统级锁保证，进程退出（包括崩溃）时自动释放；因此数据目录必须支持 SQLite 锁，且门禁运行期间不能删除或替换锁文件。需要启用 Node.js 内置的 `node:sqlite` 模块，这也是本包要求 Node.js 22.19 或更高版本的原因。
+状态位于 `$DSH_HOME/profiles/<name>/data/dsh-frontgate.json`。在 POSIX 系统上文件权限会被收紧为 `0600`；在 Windows 上需要使用 Windows ACL 限制对 profile 数据目录的访问。每个 profile 只允许一个门禁实例，由同目录下基于 SQLite 的操作系统级锁保证，进程退出（包括崩溃）时自动释放；因此数据目录必须支持 SQLite 锁，且门禁运行期间不能删除或替换锁文件。需要启用 Node.js 内置的 `node:sqlite` 模块，这也是本包要求 Node.js 22.19 或更高版本的原因。
 
 ### 远程访问
 

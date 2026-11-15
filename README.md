@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-For the GitHub-only 0.1.8 release, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.8/lornatang-dsh-frontgate-0.1.8.tgz` or run `install.sh` from this release. The npm registry version may be older.
+For the GitHub-only 0.1.9 release, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.9/lornatang-dsh-frontgate-0.1.9.tgz` or run `install.sh` from this release. The npm registry version may be older.
 
 The `add` command composes the layer into the profile: its `cordis.patch.yml` gains an insert entry, row id `frontgate`, whose `config` starts from the loopback defaults below. A package whose manifest omits the `dsh.bundle.patch` declaration fails this step instead of silently mounting nothing. Restart DSH after installing, then open <http://127.0.0.1:3090> and sign in.
 
@@ -99,7 +99,7 @@ After `maxAttempts` failed logins a client IP is locked out for `lockMinutes`, a
 
 A session lasts `sessionDays` regardless of activity. The cookie is `dsh_gate`, `HttpOnly`, `SameSite=Lax`, and `Secure` whenever the public origin is HTTPS. `/__gate/logout` revokes the session, closes its HTTP streams and WebSockets, and asks the browser to clear cached content with `Clear-Site-Data`; other sessions stay connected. Revocations persist across restarts.
 
-State lives in `$DSH_HOME/profiles/<name>/data/dsh-frontgate.json` and is tightened to `0600`. One live gate per profile is enforced by an OS-backed SQLite lock in the same directory, released automatically on process exit, including a crash; therefore the data directory must support SQLite locking and the lock file must not be removed or replaced while the gate runs. The Node.js built-in `node:sqlite` module must be enabled, which is why the package requires Node.js 22.19 or newer.
+State lives in `$DSH_HOME/profiles/<name>/data/dsh-frontgate.json`. On POSIX systems its permissions are tightened to `0600`; on Windows, restrict access to the profile data directory with Windows ACLs. One live gate per profile is enforced by an OS-backed SQLite lock in the same directory, released automatically on process exit, including a crash; therefore the data directory must support SQLite locking and the lock file must not be removed or replaced while the gate runs. The Node.js built-in `node:sqlite` module must be enabled, which is why the package requires Node.js 22.19 or newer.
 
 ### Remote access
 

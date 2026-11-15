@@ -8,6 +8,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { apply, Config, hashPassword, injectPolyfill } from '../lib/index.js'
 
@@ -494,8 +495,9 @@ test('a second gate cannot use the same profile or disturb the first gate', asyn
   await Promise.race([stream.ended, delay(2000).then(() => { throw new Error('revoked stream stayed open') })])
   gate.dispose()
   const replacement = await startGate(upstream.port, dir)
-  t.after(() => replacement.dispose())
-  assert.equal((await request(replacement.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 401)
+  try {
+    assert.equal((await request(replacement.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 401)
+  } finally { replacement.dispose() }
 })
 
 test('an abruptly terminated process releases the profile lock without losing sessions', async (t) => {
@@ -906,7 +908,9 @@ test('changing the password revokes old sessions', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const upstream = await startUpstream()
   const first = await startGate(upstream.port, dir)
+  let second
   t.after(async () => {
+    second?.dispose()
     first.dispose()
     await upstream.close()
     rmSync(dir, { recursive: true, force: true })
@@ -915,8 +919,7 @@ test('changing the password revokes old sessions', async (t) => {
   assert.ok(cookie)
   first.dispose()
   const rotated = hashPassword('a-brand-new-password')
-  const second = await startGate(upstream.port, dir, { passwordHash: rotated })
-  t.after(() => second.dispose())
+  second = await startGate(upstream.port, dir, { passwordHash: rotated })
   const stale = await request(second.port, '/', { headers: { cookie } })
   assert.equal(stale.res.status, 302)
   const fresh = await login(second.port, 'a-brand-new-password')
@@ -979,7 +982,9 @@ test('an HTTP stream closes at session expiry without closing another session', 
 test('a generated password is printed once and remains valid after restart', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const upstream = await startUpstream()
+  let gate
   t.after(async () => {
+    gate?.dispose()
     await upstream.close()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -1016,8 +1021,7 @@ test('a generated password is printed once and remains valid after restart', asy
   assert.doesNotMatch(second.stderr, /\[dsh-frontgate\] PASSWORD:/)
   assert.equal(readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8'), state)
 
-  const gate = await startGate(upstream.port, dir, { passwordHash: JSON.parse(state).passwordHash })
-  t.after(() => gate.dispose())
+  gate = await startGate(upstream.port, dir, { passwordHash: JSON.parse(state).passwordHash })
   assert.equal((await login(gate.port, generated)).res.status, 303)
 })
 
@@ -1033,7 +1037,14 @@ test('password can come from the environment', async (t) => {
 test('short configured passwords are refused', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const upstream = await startUpstream()
+  let gate
+  let accepted
+  const previousPassword = process.env.DSH_FRONTGATE_PASSWORD
   t.after(async () => {
+    gate?.stop()
+    accepted?.dispose()
+    if (previousPassword === undefined) delete process.env.DSH_FRONTGATE_PASSWORD
+    else process.env.DSH_FRONTGATE_PASSWORD = previousPassword
     await upstream.close()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -1043,17 +1054,15 @@ test('short configured passwords are refused', async (t) => {
     /at least 12 characters/,
   )
   process.env.DSH_FRONTGATE_PASSWORD = 'short'
-  t.after(() => { delete process.env.DSH_FRONTGATE_PASSWORD })
   const fromEnv = makeCtx(upstream.port, dir)
   assert.throws(
     () => apply(fromEnv.ctx, { listenPort: 0, passwordHash: '' }),
     /DSH_FRONTGATE_PASSWORD/,
   )
   // Exactly twelve characters are accepted.
-  const accepted = makeCtx(upstream.port, dir)
-  const gate = apply(accepted.ctx, { listenPort: 0, passwordHash: '', password: 'twelve-chars' })
+  accepted = makeCtx(upstream.port, dir)
+  gate = apply(accepted.ctx, { listenPort: 0, passwordHash: '', password: 'twelve-chars' })
   await gate.ready()
-  t.after(() => { gate.stop(); accepted.dispose() })
   const { res, cookie } = await login(gate.address().port, 'twelve-chars')
   assert.equal(res.status, 303)
   assert.ok(cookie)
@@ -1275,14 +1284,8 @@ test('an upstream websocket 401 also invalidates the cached cookie', async (t) =
 
 test('HTTPS upstream validates its certificate and hostname for HTTP and websockets', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-upstream-tls-'))
-  const certPath = join(dir, 'cert.pem')
-  const keyPath = join(dir, 'key.pem')
-  const cert = spawnSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
-    '-out', certPath, '-days', '1', '-subj', '/CN=upstream.test',
-    '-addext', 'subjectAltName=DNS:upstream.test',
-  ], { stdio: 'ignore' })
-  assert.equal(cert.status, 0, 'openssl is required for upstream TLS tests')
+  const certPath = fileURLToPath(new URL('./fixtures/test-cert.pem', import.meta.url))
+  const keyPath = fileURLToPath(new URL('./fixtures/test-key.pem', import.meta.url))
   const sockets = new Set()
   const upstream = https.createServer({ key: readFileSync(keyPath), cert: readFileSync(certPath) }, (req, res) => {
     if (req.url.startsWith('/?token=')) {
@@ -1389,13 +1392,15 @@ test('cross-origin websocket upgrades are refused', async (t) => {
   same.socket.destroy()
 })
 
-test('state file permissions are tightened on startup', async (t) => {
+test('startup preserves existing state and tightens POSIX permissions', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const dataDir = join(dir, 'data')
   mkdirSync(dataDir, { recursive: true })
   const statePath = join(dataDir, 'dsh-frontgate.json')
   writeFileSync(statePath, JSON.stringify({ passwordHash: HASH, secret: 'a'.repeat(64) }) + '\n')
   chmodSync(statePath, 0o644)
+  const previousMode = statSync(statePath).mode & 0o777
+  const original = readFileSync(statePath, 'utf8')
   const upstream = await startUpstream()
   const gate = await startGate(upstream.port, dir)
   t.after(async () => {
@@ -1403,7 +1408,9 @@ test('state file permissions are tightened on startup', async (t) => {
     await upstream.close()
     rmSync(dir, { recursive: true, force: true })
   })
-  assert.equal(statSync(statePath).mode & 0o777, 0o600)
+  assert.equal(statSync(statePath).mode & 0o777, process.platform === 'win32' ? previousMode : 0o600)
+  assert.equal(readFileSync(statePath, 'utf8'), original)
+  assert.equal((await login(gate.port)).res.status, 303)
 })
 
 test('malformed state is preserved instead of silently resetting credentials', async (t) => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import https from 'node:https'
 import { createHash } from 'node:crypto'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,11 +13,14 @@ import { apply } from '../lib/index.js'
 const chromePath = process.env.CHROME_PATH || [
   '/usr/bin/google-chrome', '/usr/bin/chromium',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ...[process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA]
+    .filter(Boolean).map((base) => join(base, 'Google', 'Chrome', 'Application', 'chrome.exe')),
 ].find((path) => existsSync(path))
 const browserOptions = { timeout: 30000, skip: !chromePath && !process.env.CI ? 'Chrome not installed' : false }
 const password = 'browser-test-password'
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const close = (server) => new Promise((resolve) => { server.closeAllConnections?.(); server.close(resolve) })
+const removeBrowserProfile = (dir) => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 
 function startGate(dir, upstream, extra = {}) {
   const ctx = {
@@ -66,6 +69,16 @@ async function startBrowser(dir) {
     '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
     `--user-data-dir=${join(dir, 'chrome')}`, 'about:blank',
   ], { stdio: 'ignore' })
+  const stopChrome = async () => {
+    if (chrome.exitCode !== null || chrome.signalCode !== null) return
+    const exited = new Promise((resolve) => chrome.once('exit', resolve))
+    chrome.kill('SIGTERM')
+    await Promise.race([exited, delay(5000, undefined, { ref: false })])
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      chrome.kill('SIGKILL')
+      await Promise.race([exited, delay(5000, undefined, { ref: false })])
+    }
+  }
   try {
     let port
     for (let i = 0; i < 150; i++) {
@@ -120,10 +133,10 @@ async function startBrowser(dir) {
         return result.result.value
       },
       async submit(expression) { const done = loaded(); await send('Runtime.evaluate', { expression }); await wait(done) },
-      async close() { socket.close(); chrome.kill('SIGTERM'); await delay(250) },
+      async close() { socket.close(); await stopChrome() },
     }
   } catch (error) {
-    chrome.kill('SIGTERM')
+    await stopChrome()
     throw error
   }
 }
@@ -148,7 +161,7 @@ test('browser login succeeds and cross-port form and WebSocket attacks are refus
     gate.stop()
     await close(attacker)
     await upstream.close()
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    removeBrowserProfile(dir)
   })
   browser = await startBrowser(dir)
   await browser.navigate(`http://127.0.0.1:${port}/__gate/login`)
@@ -177,7 +190,7 @@ test('browser websocket stays open without receiving an upstream cookie', browse
     await browser?.close()
     gate.stop()
     await upstream.close()
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    removeBrowserProfile(dir)
   })
   browser = await startBrowser(dir)
   await browser.navigate(`http://127.0.0.1:${port}/__gate/login`)
@@ -213,7 +226,7 @@ test('logout clears an older cached protected file in a trustworthy browser orig
     gate?.stop()
     if (oldGate.listening) await close(oldGate)
     await upstream.close()
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    removeBrowserProfile(dir)
   })
   browser = await startBrowser(dir)
   await browser.navigate(file)
@@ -250,7 +263,7 @@ test('browser login succeeds when the external and listener ports differ', brows
     gate.stop()
     await close(proxy)
     await upstream.close()
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    removeBrowserProfile(dir)
   })
   browser = await startBrowser(dir)
   await browser.navigate(`http://127.0.0.1:${proxy.address().port}/__gate/login`)
@@ -260,13 +273,11 @@ test('browser login succeeds when the external and listener ports differ', brows
 
 test('HTTPS-terminating proxy issues a Secure cookie that is not sent over HTTP', browserOptions, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-tls-'))
-  const cert = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem'), '-days', '1', '-subj', '/CN=gate.test'], { stdio: 'ignore' })
-  assert.equal(cert.status, 0, 'openssl is required for the HTTPS test')
   const upstream = makeUpstream()
   await listen(upstream.server)
   let gate
   let loginCookie = ''
-  const proxy = https.createServer({ key: readFileSync(join(dir, 'key.pem')), cert: readFileSync(join(dir, 'cert.pem')) }, (req, res) => {
+  const proxy = https.createServer({ key: readFileSync(new URL('./fixtures/test-key.pem', import.meta.url)), cert: readFileSync(new URL('./fixtures/test-cert.pem', import.meta.url)) }, (req, res) => {
     const target = http.request({ host: '127.0.0.1', port: gate.address().port, path: req.url, method: req.method, headers: req.headers }, (response) => {
       if (req.method === 'POST' && req.url.startsWith('/__gate/login')) loginCookie = (response.headers['set-cookie'] || [])[0] || ''
       res.writeHead(response.statusCode, response.headers)
@@ -292,7 +303,7 @@ test('HTTPS-terminating proxy issues a Secure cookie that is not sent over HTTP'
     await close(proxy)
     await close(other)
     await upstream.close()
-    rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    removeBrowserProfile(dir)
   })
   browser = await startBrowser(dir)
   await browser.navigate(`https://gate.test:${proxy.address().port}/__gate/login`)
