@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 const root = new URL('..', import.meta.url)
 const manifest = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'))
-const packageRef = manifest.name + '@' + manifest.version
+const packageRef = `https://github.com/Lornatang/dsh-frontgate/releases/download/v${manifest.version}/lornatang-dsh-frontgate-${manifest.version}.tgz`
 
 test('the DSH bundle loads the published package name', () => {
   const patch = readFileSync(new URL('cordis.patch.yml', root), 'utf8')

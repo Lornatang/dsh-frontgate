@@ -15,6 +15,9 @@ const home = join(temp, 'home')
 const dshHome = join(temp, 'dsh-home')
 const dsh = join(install, 'node_modules', '.bin', 'dsh')
 const password = 'integration-test-password'
+const runNpm = (args, options) => process.env.npm_execpath
+  ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], options)
+  : execFileSync('npm', args, options)
 const env = {
   HOME: home,
   DSH_HOME: dshHome,
@@ -27,9 +30,11 @@ try {
   mkdirSync(home, { recursive: true })
   const version = execFileSync(dsh, ['--version'], { env, cwd: temp, encoding: 'utf8' }).trim()
   assert.ok(version, 'DSH did not report its version')
-  const packed = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], {
+  const packageOutput = JSON.parse(runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], {
     cwd: root, encoding: 'utf8',
-  }))[0]
+  }))
+  const packed = Array.isArray(packageOutput) ? packageOutput[0] : Object.values(packageOutput)[0]
+  assert.ok(packed?.filename, 'npm pack did not return a package')
   execFileSync(dsh, ['plugin', '--profile', 'web', 'add', join(temp, packed.filename), '--registry=https://registry.npmjs.org/'], {
     env, cwd: temp, timeout: 120000, stdio: 'pipe',
   })

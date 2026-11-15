@@ -6,6 +6,7 @@
  */
 import { STATUS_CODES } from 'node:http'
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
+import { isIP } from 'node:net'
 import type { Duplex } from 'node:stream'
 
 /** Largest accepted login form body. */
@@ -59,7 +60,24 @@ function requestOrigin(req: IncomingMessage, publicOrigin: string, useTls: boole
     const protocol = publicOrigin ? new URL(publicOrigin).protocol : useTls ? 'https:' : 'http:'
     const url = new URL(protocol + '//' + host)
     if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return undefined
-    if (publicOrigin && url.origin !== publicOrigin) return undefined
+    if (publicOrigin) {
+      if (url.origin !== publicOrigin) return undefined
+    } else {
+      // Without an explicitly configured public authority, trust only the
+      // address and port on which this connection was actually accepted.
+      const port = Number(url.port || (protocol === 'https:' ? 443 : 80))
+      if (port !== req.socket.localPort) return undefined
+      const local = (req.socket.localAddress ?? '').replace(/^::ffff:/i, '')
+      const hostname = url.hostname.replace(/^\[|\]$/g, '')
+      if (hostname === 'localhost') {
+        if (!isLoopbackHost(local)) return undefined
+      } else {
+        const localFamily = isIP(local)
+        if (!localFamily || !isIP(hostname)) return undefined
+        const canonical = (address: string): string => new URL(`http://${isIP(address) === 6 ? `[${address}]` : address}`).hostname
+        if (canonical(hostname) !== canonical(local)) return undefined
+      }
+    }
     return url.origin
   } catch {
     return undefined

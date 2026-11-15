@@ -34,6 +34,8 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
+For the GitHub-only 0.1.8 release, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.8/lornatang-dsh-frontgate-0.1.8.tgz` or run `install.sh` from this release. The npm registry version may be older.
+
 The `add` command composes the layer into the profile: its `cordis.patch.yml` gains an insert entry, row id `frontgate`, whose `config` starts from the loopback defaults below. A package whose manifest omits the `dsh.bundle.patch` declaration fails this step instead of silently mounting nothing. Restart DSH after installing, then open <http://127.0.0.1:3090> and sign in.
 
 With no configured and no saved password, the first start generates one and logs it once:
@@ -76,7 +78,7 @@ The loader validates each field against `src/config.ts` and rejects an invalid v
 | `password` | empty | Plain-text password, at least 12 characters; hashed at startup and never written to disk as text. |
 | `passwordHash` | empty | scrypt hash; takes precedence over every other password source. |
 | `tlsCertFile` / `tlsKeyFile` | empty | Set both to serve HTTPS directly from the gate. |
-| `publicOrigin` | empty | Browser-facing origin when a reverse proxy terminates TLS, for example `https://gate.example.com`. |
+| `publicOrigin` | empty | Exact browser-facing origin when using a hostname, NAT, or reverse proxy, for example `https://gate.example.com`. |
 | `trustProxy` | `false` | Honour `X-Forwarded-For`; enable only when the listener is restricted to a trusted proxy. |
 | `maxAttempts` | `5` | Failed logins before a client IP is locked out, 1–50. |
 | `lockMinutes` | `5` | Lockout duration, 1–1440 minutes. |
@@ -109,6 +111,7 @@ For Docker, bind the gate to all interfaces and publish its port; the container 
   config:
     listenHost: '0.0.0.0'
     listenPort: 30010
+    publicOrigin: 'http://<host-ip>:30190' # replace with the actual browser-facing origin
 ```
 
 ```yaml
@@ -117,7 +120,7 @@ ports:
   - '30190:30010'
 ```
 
-Open `http://<host-ip>:30190` afterwards. Leave `publicOrigin` empty and `trustProxy` disabled for direct HTTP access, and keep the harness itself on loopback so the gate cannot be bypassed on the host.
+Open `http://<host-ip>:30190` afterwards. Set `publicOrigin` to that exact browser-facing origin whenever NAT, a reverse proxy, or a hostname makes it different from the gate's local address and port. With no `publicOrigin`, the gate accepts only its local socket address and port (and `localhost` for loopback). Keep `trustProxy` disabled for direct HTTP access and keep the harness itself on loopback so the gate cannot be bypassed on the host.
 
 Behind an HTTPS reverse proxy, set `publicOrigin` to the external origin and preserve the original `Host` header, including any non-default port (Nginx: `proxy_set_header Host $http_host;`). Restrict direct access to the gate listener to the proxy. With `trustProxy` enabled the proxy must replace client-supplied `X-Forwarded-For` with the real client address (Nginx: `proxy_set_header X-Forwarded-For $remote_addr;`), because the gate otherwise trusts what the client sent. `maxConnectionsPerPeer` counts the TCP peer, so proxied traffic shares the proxy's limit; apply per-client limits at the proxy.
 

@@ -349,6 +349,25 @@ test('cross-site login requests are rejected', async (t) => {
   assert.equal(cookies.length, 0)
 })
 
+test('default origin rejects untrusted hosts for login, proxy and websocket', async (t) => {
+  const { gate, upstream } = await withGate(t)
+  const hostile = `attacker.example:${gate.port}`
+  const rejected = await login(gate.port, PASSWORD, '/', { host: hostile, origin: `http://${hostile}`, 'sec-fetch-site': 'same-origin' })
+  assert.equal(rejected.res.status, 403)
+  assert.equal(rejected.cookies.length, 0)
+  const localhost = await login(gate.port, PASSWORD, '/', { host: `localhost:${gate.port}`, origin: `http://localhost:${gate.port}` })
+  assert.equal(localhost.res.status, 303)
+  const { cookie } = await login(gate.port)
+  const proxied = await request(gate.port, '/api/sessions', { headers: { host: hostile, origin: `http://${hostile}`, cookie } })
+  assert.equal(proxied.res.status, 403)
+  assert.equal(upstream.seen.some((entry) => entry.url === '/api/sessions'), false)
+  const wrongPort = await request(gate.port, '/', { headers: { host: '127.0.0.1:1', cookie } })
+  assert.equal(wrongPort.res.status, 403)
+  const ws = await openWebSocket(gate.port, cookie, `http://${hostile}`, hostile)
+  assert.match(ws.text(), /HTTP\/1\.1 403/)
+  ws.socket.destroy()
+})
+
 test('null origins and cross-site form submissions remain rejected', async (t) => {
   const { gate } = await withGate(t)
   for (const headers of [{ origin: 'null', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-site': 'cross-site' }]) {

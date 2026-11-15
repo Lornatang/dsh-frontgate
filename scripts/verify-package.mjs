@@ -7,14 +7,19 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const temp = mkdtempSync(join(tmpdir(), 'frontgate-package-'))
+const runNpm = (args, options) => process.env.npm_execpath
+  ? execFileSync(process.execPath, [process.env.npm_execpath, ...args], options)
+  : execFileSync('npm', args, options)
 try {
-  const packed = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], {
+  const output = JSON.parse(runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], {
     cwd: root, encoding: 'utf8',
-  }))[0]
+  }))
+  const packed = Array.isArray(output) ? output[0] : Object.values(output)[0]
+  assert.ok(packed?.filename, 'npm pack did not return a package')
   assert.ok(packed.files.some((entry) => entry.path === 'lib/index.js'), 'built entry point missing from package')
   assert.ok(packed.files.some((entry) => entry.path === 'cordis.patch.yml'), 'DSH patch missing from package')
   writeFileSync(join(temp, 'package.json'), '{"name":"frontgate-package-smoke-test","private":true,"type":"module"}\n')
-  execFileSync('npm', ['install', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', join(temp, packed.filename)], {
+  runNpm(['install', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', join(temp, packed.filename)], {
     cwd: temp, stdio: 'inherit',
   })
   const smoke = `

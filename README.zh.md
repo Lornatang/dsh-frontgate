@@ -34,6 +34,8 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
+安装仅发布到 GitHub 的 0.1.8 版本，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.8/lornatang-dsh-frontgate-0.1.8.tgz`，或运行本版本的 `install.sh`。npm 仓库中的版本可能较旧。
+
 `add` 会把这一层组合进 profile：它的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `frontgate`，其 `config` 以下面的回环默认值为起点。清单中没有 `dsh.bundle.patch` 声明的包会在这一步失败，而不是静默地什么都不挂载。安装后重启 DSH，再打开 <http://127.0.0.1:3090> 登录。
 
 如果既没有配置密码、也没有已保存的密码，首次启动会生成一个并打印一次：
@@ -76,7 +78,7 @@ loader 会按 `src/config.ts` 校验每个字段，非法值在启动时直接�
 | `password` | 空 | 明文密码，至少 12 个字符；启动时哈希，明文不落盘。 |
 | `passwordHash` | 空 | scrypt 哈希；优先级高于其他所有密码来源。 |
 | `tlsCertFile` / `tlsKeyFile` | 空 | 两者同时设置时由门禁直接提供 HTTPS。 |
-| `publicOrigin` | 空 | 由反向代理终止 TLS 时的浏览器侧 origin，例如 `https://gate.example.com`。 |
+| `publicOrigin` | 空 | 使用主机名、NAT 或反向代理时浏览器实际访问的完整 origin，例如 `https://gate.example.com`。 |
 | `trustProxy` | `false` | 是否采信 `X-Forwarded-For`；仅在监听端口只对可信代理开放时启用。 |
 | `maxAttempts` | `5` | 同一客户端 IP 锁定前允许的失败次数，1–50。 |
 | `lockMinutes` | `5` | 锁定时长，1–1440 分钟。 |
@@ -109,6 +111,7 @@ loader 会按 `src/config.ts` 校验每个字段，非法值在启动时直接�
   config:
     listenHost: '0.0.0.0'
     listenPort: 30010
+    publicOrigin: 'http://<host-ip>:30190' # 替换为浏览器实际访问的 origin
 ```
 
 ```yaml
@@ -117,7 +120,7 @@ ports:
   - '30190:30010'
 ```
 
-之后访问 `http://<host-ip>:30190`。直接走 HTTP 访问时让 `publicOrigin` 留空、`trustProxy` 保持关闭，并把 harness 本身保持在回环地址上，避免在宿主机上绕过门禁。
+之后访问 `http://<host-ip>:30190`。当 NAT、反向代理或主机名使浏览器地址与门禁本地地址和端口不同时，将 `publicOrigin` 设置为浏览器实际访问的完整 origin。未配置时，门禁只接受连接的本地地址和端口（回环连接还允许 `localhost`）。直接走 HTTP 访问时让 `trustProxy` 保持关闭，并把 harness 本身保持在回环地址上，避免在宿主机上绕过门禁。
 
 在 HTTPS 反向代理之后，把 `publicOrigin` 设为对外 origin，并保留原始 `Host` 头（含可能的非默认端口；Nginx: `proxy_set_header Host $http_host;`）。门禁监听端口应只对代理开放。启用 `trustProxy` 时，代理必须用真实客户端地址覆盖客户端自带的 `X-Forwarded-For`（Nginx: `proxy_set_header X-Forwarded-For $remote_addr;`），否则门禁会采信客户端伪造的值。`maxConnectionsPerPeer` 统计的是 TCP 对端，经过代理的流量共享代理的额度；按客户端限流请在代理上做。
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-11-15
+
+- Validate the browser-facing Host against the listener or configured public origin, including WebSocket upgrades.
+- Install the matching GitHub release archive and keep installer and package versions aligned.
+
 ## 0.1.7 - 2026-11-15
 
 - Rewrite the README to the package-bundle documentation convention and add a

@@ -2,8 +2,9 @@
 # Compatibility wrapper for DSH's built-in plugin installer.
 set -euo pipefail
 
-VERSION="0.1.6"
+VERSION="0.1.8"
 PACKAGE="@lornatang/dsh-frontgate"
+PACKAGE_URL="https://github.com/Lornatang/dsh-frontgate/releases/download/v${VERSION}/lornatang-dsh-frontgate-${VERSION}.tgz"
 PROFILE="${DSH_FRONTGATE_PROFILE:-web}"
 
 usage() {
@@ -54,8 +55,8 @@ if [ -f "$PROFILE_DIR/package.json" ] && grep -Fq '"dsh-frontgate"' "$PROFILE_DI
   die "legacy dsh-frontgate detected; stop DSH and follow the migration steps in README.md"
 fi
 
-echo "installing $PACKAGE@$VERSION into profile '$PROFILE'"
-dsh plugin --profile "$PROFILE" add "$PACKAGE@$VERSION"
+echo "installing $PACKAGE@$VERSION from GitHub into profile '$PROFILE'"
+dsh plugin --profile "$PROFILE" add "$PACKAGE_URL"
 
 cat <<EOF
 

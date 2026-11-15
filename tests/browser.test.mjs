@@ -232,8 +232,7 @@ test('browser login succeeds when the external and listener ports differ', brows
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-browser-port-'))
   const upstream = makeUpstream()
   await listen(upstream.server)
-  const gate = startGate(dir, upstream.server, { listenHost: '0.0.0.0' })
-  await gate.ready()
+  let gate
   const proxy = http.createServer((req, res) => {
     const target = http.request({ host: '127.0.0.1', port: gate.address().port, path: req.url, method: req.method, headers: req.headers }, response => {
       res.writeHead(response.statusCode, response.headers)
@@ -243,6 +242,8 @@ test('browser login succeeds when the external and listener ports differ', brows
     req.pipe(target)
   })
   await listen(proxy)
+  gate = startGate(dir, upstream.server, { listenHost: '0.0.0.0', publicOrigin: `http://127.0.0.1:${proxy.address().port}` })
+  await gate.ready()
   let browser
   t.after(async () => {
     await browser?.close()
