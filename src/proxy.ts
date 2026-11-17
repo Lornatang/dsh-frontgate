@@ -106,6 +106,7 @@ export function createProxy(options: ProxyOptions): Proxy {
         path: url.pathname + url.search,
         method: 'GET',
         headers: { host: target.host, accept: 'text/html' },
+        agent: upstreamAgent,
         ...tlsOptions,
       }, (res) => {
         res.resume()
@@ -168,7 +169,12 @@ export function createProxy(options: ProxyOptions): Proxy {
     // '//host' is protocol-relative and '\\host' is treated as '//host' by
     // browsers; both would leave this origin.
     if (rest.startsWith('//') || rest.startsWith('/\\')) return '/'
-    return rest.startsWith('/') ? rest : value
+    // Only a path, query or fragment delimiter still belongs to this origin.
+    // Anything else ('.evil.com', '@evil.com', ...) is a different authority
+    // and passes through as an external URL.
+    if (rest.startsWith('/')) return rest
+    if (rest.startsWith('?') || rest.startsWith('#')) return '/' + rest
+    return value
   }
 
   function forward(req: IncomingMessage, res: ServerResponse, cookie: string): void {

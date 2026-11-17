@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.10 - 2026-11-17
+
+- Admit new login clients when the failure store is full of partial failure
+  counts by evicting the stalest partial record; live lockouts and in-flight
+  checks are still never evicted, and a store full of live lockouts still
+  fails closed.
+- Reject stored scrypt hashes whose total work exceeds 512 MiB so a crafted
+  password hash cannot burn unbounded CPU or memory on every login.
+- Rewrite self-origin redirect Locations that carry only a query or fragment,
+  and leave prefix-similar external authorities untouched.
+- Send Strict-Transport-Security whenever the public origin is https, including
+  when TLS terminates at a reverse proxy.
+- Run the launch-token exchange on the owned upstream agent so shutdown
+  destroys every upstream socket.
+- Publish this release on GitHub only; npm is not updated.
+
 ## 0.1.9 - 2026-11-15
 
 - Close test gates before removing their state directories and exercise the correct Windows and POSIX permission behavior.

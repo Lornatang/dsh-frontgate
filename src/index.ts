@@ -196,7 +196,9 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   })
 
   const requestListener = (req: IncomingMessage, res: ServerResponse): void => {
-    if (useTls) res.setHeader('strict-transport-security', 'max-age=31536000')
+    // Also emit HSTS when TLS terminates at a reverse proxy: browsers ignore
+    // it over plain http, and the proxy relays it to the https client.
+    if (publicProto === 'https') res.setHeader('strict-transport-security', 'max-age=31536000')
     handler(req, res).catch((err: unknown) => {
       logger.warn('handler error: ' + (err instanceof Error && err.stack ? err.stack : String(err)))
       if (!res.headersSent) text(res, 500, 'dsh-frontgate: internal error\n')

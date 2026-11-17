@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
-import { apply, Config, hashPassword, injectPolyfill } from '../lib/index.js'
+import { apply, Config, hashPassword, injectPolyfill, verifyPassword } from '../lib/index.js'
 
 const PASSWORD = 'correct horse battery staple'
 const HASH = hashPassword(PASSWORD)
@@ -65,6 +65,22 @@ function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
       }
       if (req.url === '/redirect-relative') {
         res.writeHead(302, { location: 'http://127.0.0.1:' + port + '//evil.example/target' })
+        return res.end()
+      }
+      if (req.url === '/redirect-query') {
+        res.writeHead(302, { location: 'http://127.0.0.1:' + port + '?x=1' })
+        return res.end()
+      }
+      if (req.url === '/redirect-fragment') {
+        res.writeHead(302, { location: 'http://127.0.0.1:' + port + '#frag' })
+        return res.end()
+      }
+      if (req.url === '/redirect-suffix') {
+        res.writeHead(302, { location: 'http://127.0.0.1:' + port + '.evil.example/target' })
+        return res.end()
+      }
+      if (req.url === '/redirect-userinfo') {
+        res.writeHead(302, { location: 'http://127.0.0.1:' + port + '@evil.example/target' })
         return res.end()
       }
       if (req.url === '/api/sessions') {
@@ -452,6 +468,29 @@ test('protocol-relative upstream Locations stay on site', async (t) => {
   assert.equal(headers.get('location'), '/')
 })
 
+test('self-origin query and fragment Locations are rewritten to paths', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const query = await request(gate.port, '/redirect-query', { headers: { cookie } })
+  assert.equal(query.res.status, 302)
+  assert.equal(query.headers.get('location'), '/?x=1')
+  const fragment = await request(gate.port, '/redirect-fragment', { headers: { cookie } })
+  assert.equal(fragment.res.status, 302)
+  assert.equal(fragment.headers.get('location'), '/#frag')
+})
+
+test('prefix-similar authorities pass through as external Locations', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  for (const path of ['/redirect-suffix', '/redirect-userinfo']) {
+    const { res, headers } = await request(gate.port, path, { headers: { cookie } })
+    assert.equal(res.status, 302)
+    const location = headers.get('location')
+    assert.ok(location.startsWith('http://127.0.0.1:'))
+    assert.ok(location.includes('evil.example/target'))
+  }
+})
+
 test('logout clears the cookie', async (t) => {
   const { gate } = await withGate(t)
   const { res, cookies } = await request(gate.port, '/__gate/logout')
@@ -679,6 +718,35 @@ test('a full failure store preserves existing lockouts and recovers when they ex
   now += 61000
   assert.equal((await login(gate.port, PASSWORD, '/', original)).res.status, 303)
   assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.1' })).res.status, 303)
+})
+
+test('a failure store full of partial counts still admits new clients', async (t) => {
+  const { gate } = await withGate(t, {
+    passwordHash: hashPassword(PASSWORD, { N: 1024 }), maxAttempts: 5, lockMinutes: 1, trustProxy: true,
+  })
+  // One real lockout that must survive eviction pressure.
+  const locked = { 'x-forwarded-for': '198.51.100.9' }
+  for (let i = 0; i < 5; i++) assert.equal((await login(gate.port, 'wrong', '/', locked)).res.status, 401)
+  assert.equal((await login(gate.port, PASSWORD, '/', locked)).res.status, 429)
+  // Fill every remaining slot with a single partial failure.
+  for (let i = 0; i < 1023; i++) {
+    const ip = `10.0.${Math.floor(i / 256)}.${i % 256}`
+    assert.equal((await login(gate.port, 'wrong', '/', { 'x-forwarded-for': ip })).res.status, 401)
+  }
+  // A brand-new client with the correct password is admitted by evicting a
+  // stale partial record, while the live lockout stays locked.
+  assert.equal((await login(gate.port, PASSWORD, '/', { 'x-forwarded-for': '192.0.2.55' })).res.status, 303)
+  assert.equal((await login(gate.port, PASSWORD, '/', locked)).res.status, 429)
+})
+
+test('stored scrypt hashes with unbounded work are rejected without hashing', async () => {
+  const extreme = 'scrypt$1048576$32$4$' + '00'.repeat(16) + '$' + '00'.repeat(32)
+  const started = Date.now()
+  assert.equal(await verifyPassword('anything', extreme), false)
+  assert.ok(Date.now() - started < 1000)
+  const fast = hashPassword(PASSWORD, { N: 1024, r: 1, p: 1 })
+  assert.equal(await verifyPassword(PASSWORD, fast), true)
+  assert.equal(await verifyPassword('wrong', fast), false)
 })
 
 test('partial login failures expire after the lockout window', async (t) => {
@@ -1105,6 +1173,16 @@ test('configured public origin validates proxy Host and marks login and logout c
   ]) assert.equal((await login(gate.port, PASSWORD, '/', bad)).res.status, 403)
   const spoofed = await request(gate.port, '/api/sessions', { headers: { host: 'evil.example', cookie: good.cookie } })
   assert.equal(spoofed.res.status, 403)
+})
+
+test('HSTS is emitted when TLS terminates at a reverse proxy', async (t) => {
+  const { gate } = await withGate(t, { publicOrigin: 'https://gate.example:8443' })
+  const result = await request(gate.port, '/__gate/health', { headers: { host: 'gate.example:8443' } })
+  assert.equal(result.res.status, 200)
+  assert.equal(result.headers.get('strict-transport-security'), 'max-age=31536000')
+  const plain = await withGate(t)
+  const noTls = await request(plain.gate.port, '/__gate/health')
+  assert.equal(noTls.headers.get('strict-transport-security'), null)
 })
 
 test('invalid public origins and password hashes fail before creating state', async (t) => {

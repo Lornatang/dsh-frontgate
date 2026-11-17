@@ -65,6 +65,23 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
   const pendingForms = new Map<string, number>()
   let checksInFlight = 0
 
+  /** Drop the stalest partial failure record to make room for a new client.
+   * Live lockouts and in-flight checks are never evicted. */
+  function evictPartial(now: number): boolean {
+    let victim: string | undefined
+    let oldest = Infinity
+    for (const [client, failure] of failures) {
+      if (failure.until > now || clientsInFlight.has(client)) continue
+      if (failure.expiresAt < oldest) {
+        oldest = failure.expiresAt
+        victim = client
+      }
+    }
+    if (victim === undefined) return false
+    failures.delete(victim)
+    return true
+  }
+
   function lockRemaining(ip: string): number {
     const now = Date.now()
     let entry = failures.get(ip)
@@ -75,21 +92,24 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
     if (entry) return Math.max(0, entry.until - now)
     if (failures.size < MAX_TRACKED_CLIENTS) return 0
 
-    // Never evict a live failure or lockout. When full, fail closed for new
-    // clients until an existing record expires, while keeping memory bounded.
+    // Never evict a live lockout or an in-flight check. Partial failure
+    // counts may be evicted under pressure, so a store full of stale partial
+    // records cannot deny login to new clients; fail closed only when every
+    // slot holds a live lockout or in-flight check, keeping memory bounded.
     let earliest = Infinity
     for (const [client, failure] of failures) {
       if (failure.expiresAt <= now && !clientsInFlight.has(client)) failures.delete(client)
       else earliest = Math.min(earliest, failure.expiresAt)
     }
     if (failures.size < MAX_TRACKED_CLIENTS) return 0
+    if (evictPartial(now)) return 0
     return Math.max(1000, earliest - now)
   }
 
   function recordFailure(ip: string): void {
     let entry = failures.get(ip)
     if (!entry) {
-      if (failures.size >= MAX_TRACKED_CLIENTS) return
+      if (failures.size >= MAX_TRACKED_CLIENTS && !evictPartial(Date.now())) return
       entry = { count: 0, until: 0, expiresAt: 0 }
       failures.set(ip, entry)
     }

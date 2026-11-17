@@ -30,6 +30,10 @@ export interface ScryptParams {
 }
 
 const scryptMaxmem = (N: number, r: number): number => Math.max(64 * 1024 * 1024, 256 * N * r)
+/** Upper bound on total scrypt work (128*N*r*p bytes) accepted from a stored
+ * hash, so a crafted passwordHash cannot burn unbounded CPU/memory per login.
+ * The default parameters use 32 MiB; this allows 16x that. */
+const MAX_SCRYPT_WORK = 512 * 1024 * 1024
 
 /** Reject configured passwords that are too short to survive guessing. */
 export function assertStrongPassword(password: string, source: string): string {
@@ -70,6 +74,7 @@ function parseStored(stored: unknown): { N: number; r: number; p: number; salt: 
   if (!Number.isInteger(N) || N < 1024 || N > 1048576 || (N & (N - 1)) !== 0) return undefined
   if (!Number.isInteger(r) || r < 1 || r > 32) return undefined
   if (!Number.isInteger(p) || p < 1 || p > 4) return undefined
+  if (128 * N * r * p > MAX_SCRYPT_WORK) return undefined
   let salt: Buffer
   let want: Buffer
   try {

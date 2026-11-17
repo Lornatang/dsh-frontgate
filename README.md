@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-For the GitHub-only 0.1.9 release, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.9/lornatang-dsh-frontgate-0.1.9.tgz` or run `install.sh` from this release. The npm registry version may be older.
+For the GitHub-only 0.1.10 release, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.10/lornatang-dsh-frontgate-0.1.10.tgz` or run `install.sh` from this release. The npm registry version may be older.
 
 The `add` command composes the layer into the profile: its `cordis.patch.yml` gains an insert entry, row id `frontgate`, whose `config` starts from the loopback defaults below. A package whose manifest omits the `dsh.bundle.patch` declaration fails this step instead of silently mounting nothing. Restart DSH after installing, then open <http://127.0.0.1:3090> and sign in.
 
