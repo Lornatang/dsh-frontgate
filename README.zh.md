@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-安装仅发布到 GitHub 的 0.1.10 版本，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.10/lornatang-dsh-frontgate-0.1.10.tgz`，或运行本版本的 `install.sh`。npm 仓库中的版本可能较旧。
+npm 仓库与 GitHub Release 均已发布 0.1.10。如需直接安装 GitHub 归档，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.10/lornatang-dsh-frontgate-0.1.10.tgz`，或运行本版本的 `install.sh`。
 
 `add` 会把这一层组合进 profile：它的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `frontgate`，其 `config` 以下面的回环默认值为起点。清单中没有 `dsh.bundle.patch` 声明的包会在这一步失败，而不是静默地什么都不挂载。安装后重启 DSH，再打开 <http://127.0.0.1:3090> 登录。
 

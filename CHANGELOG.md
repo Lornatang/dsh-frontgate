@@ -14,7 +14,7 @@
   when TLS terminates at a reverse proxy.
 - Run the launch-token exchange on the owned upstream agent so shutdown
   destroys every upstream socket.
-- Publish this release on GitHub only; npm is not updated.
+- Publish this release on GitHub and npm.
 
 ## 0.1.9 - 2026-11-15
 
