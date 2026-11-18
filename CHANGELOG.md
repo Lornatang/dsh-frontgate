@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.11 - 2026-11-18
+
+- Refuse every `/__gate/logout` method other than `GET`, `HEAD` and `POST`.
+- Key lockouts on the peer address when the first `X-Forwarded-For` hop is not
+  an IP address, instead of trusting a client-supplied value.
+- Cache a harness cookie only after a successful launch-token exchange, so an
+  error response from the harness cannot replace every later session's cookie.
+- Rewrite bare protocol-relative redirect Locations (`//host`, `/\host`) to
+  `/` so they cannot leave the gate.
+- Stop tracking a connection that was already destroyed, so its session entry
+  and expiry timer no longer outlive it.
+- Retry the state-file rename on Windows when a scanner or indexer briefly
+  holds the destination, and sync the parent directory on POSIX.
+- Wait up to 30 s for a cold Chrome start in the browser suite, report Chrome's
+  last errors on failure, and retry once with a fresh profile.
+- Resolve every dependency from `registry.npmjs.org`; the lockfile no longer
+  points at a third-party mirror.
+- Update TypeScript to 7.0.2, esbuild to 0.28.2 and @types/node to 26.6.6, and
+  move the GitHub Actions to v7.
+- Publish this release on GitHub and npm.
+
 ## 0.1.10 - 2026-11-17
 
 - Admit new login clients when the failure store is full of partial failure

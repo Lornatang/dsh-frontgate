@@ -2,7 +2,7 @@
 # Compatibility wrapper for DSH's built-in plugin installer.
 set -euo pipefail
 
-VERSION="0.1.10"
+VERSION="0.1.11"
 PACKAGE="@lornatang/dsh-frontgate"
 PACKAGE_URL="https://github.com/Lornatang/dsh-frontgate/releases/download/v${VERSION}/lornatang-dsh-frontgate-${VERSION}.tgz"
 PROFILE="${DSH_FRONTGATE_PROFILE:-web}"
