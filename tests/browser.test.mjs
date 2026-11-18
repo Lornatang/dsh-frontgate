@@ -16,7 +16,7 @@ const chromePath = process.env.CHROME_PATH || [
   ...[process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA]
     .filter(Boolean).map((base) => join(base, 'Google', 'Chrome', 'Application', 'chrome.exe')),
 ].find((path) => existsSync(path))
-const browserOptions = { timeout: 30000, skip: !chromePath && !process.env.CI ? 'Chrome not installed' : false }
+const browserOptions = { timeout: 90000, skip: !chromePath && !process.env.CI ? 'Chrome not installed' : false }
 const password = 'browser-test-password'
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const close = (server) => new Promise((resolve) => { server.closeAllConnections?.(); server.close(resolve) })
@@ -61,16 +61,41 @@ function makeUpstream({ upgradeCookie = false } = {}) {
   }
 }
 
+// A cold Chrome start occasionally stalls before it exposes the debugging port,
+// so give each test two bounded attempts with a fresh profile.
+const CHROME_STARTUP_MS = 30000
+const CHROME_ATTEMPTS = 2
+
 async function startBrowser(dir) {
   assert.ok(chromePath && existsSync(chromePath), 'Chrome is required in CI; set CHROME_PATH')
+  let failure
+  for (let attempt = 1; attempt <= CHROME_ATTEMPTS; attempt++) {
+    try {
+      return await startChrome(join(dir, `chrome-${attempt}`))
+    } catch (error) {
+      failure = error
+    }
+  }
+  throw failure
+}
+
+async function startChrome(profile) {
   const chrome = spawn(chromePath, [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-proxy-server',
+    '--disable-background-networking', '--disable-component-update', '--disable-default-apps',
+    '--disable-extensions', '--disable-sync',
     '--ignore-certificate-errors', '--host-resolver-rules=MAP gate.test 127.0.0.1',
     '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
-    `--user-data-dir=${join(dir, 'chrome')}`, 'about:blank',
-  ], { stdio: 'ignore' })
+    `--user-data-dir=${profile}`, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  // Chrome stays silent on a healthy start, so keep its last errors and use
+  // them to explain a startup that never exposes the debugging port.
+  let output = ''
+  chrome.stderr.setEncoding('utf8')
+  chrome.stderr.on('data', (chunk) => { output = (output + chunk).slice(-4000) })
+  const running = () => chrome.exitCode === null && chrome.signalCode === null
   const stopChrome = async () => {
-    if (chrome.exitCode !== null || chrome.signalCode !== null) return
+    if (!running()) return
     const exited = new Promise((resolve) => chrome.once('exit', resolve))
     chrome.kill('SIGTERM')
     await Promise.race([exited, delay(5000, undefined, { ref: false })])
@@ -81,14 +106,21 @@ async function startBrowser(dir) {
   }
   try {
     let port
-    for (let i = 0; i < 150; i++) {
+    // Poll until the deadline, but stop early when Chrome dies.
+    const deadline = Date.now() + CHROME_STARTUP_MS
+    while (Date.now() < deadline && running()) {
       try {
-        const candidate = Number(readFileSync(join(dir, 'chrome', 'DevToolsActivePort'), 'utf8').split('\n')[0])
+        const candidate = Number(readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0])
         if (Number.isInteger(candidate) && candidate > 0) { port = candidate; break }
       } catch {}
       await delay(100)
     }
-    assert.ok(port, 'Chrome debugging endpoint unavailable')
+    if (!port) {
+      const reason = running()
+        ? `did not expose a debugging port within ${CHROME_STARTUP_MS}ms`
+        : `exited with ${chrome.exitCode ?? chrome.signalCode} before exposing a debugging port`
+      throw new Error(`Chrome ${reason}${output.trim() ? `\n${output.trim()}` : ''}`)
+    }
     const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json()
     const socket = new WebSocket(target.webSocketDebuggerUrl)
     await new Promise((resolve, reject) => {
