@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12 - 2026-11-19
+
+- Stop passing an unused context to the logger resolver and stop exporting the internal origin/host matcher.
+- Attach install.sh to the GitHub release, as the README already describes.
+
 ## 0.1.11 - 2026-11-18
 
 - Refuse every `/__gate/logout` method other than `GET`, `HEAD` and `POST`.

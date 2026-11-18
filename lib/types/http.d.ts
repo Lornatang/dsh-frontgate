@@ -14,8 +14,6 @@ export declare function clientIp(req: IncomingMessage, trustProxy: boolean): str
 export declare function normalizePublicOrigin(value: string): string;
 /** The configured public authority must match the Host preserved by a proxy. */
 export declare const hostMatchesPublicOrigin: (req: IncomingMessage, publicOrigin: string, useTls: boolean) => boolean;
-/** Require a valid Host, and if present an Origin with identical scheme, host and port. */
-export declare function originMatchesHost(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean;
 /** Login check: Origin and Fetch-Site must both look same-origin. */
 export declare function sameOrigin(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean;
 /** Only same-site absolute paths; rejects //evil and backslash tricks. */

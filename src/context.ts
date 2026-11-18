@@ -50,8 +50,7 @@ export interface LogSink {
  * and the web profile installs none of them, so a generated password or a
  * listen address logged there would never reach the operator.
  */
-export function resolveLogger(ctx: Context): LogSink {
-  void ctx
+export function resolveLogger(): LogSink {
   const write = (message: string): void => {
     process.stderr.write('[dsh-frontgate] ' + message + '\n')
   }

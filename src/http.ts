@@ -95,7 +95,7 @@ export const hostMatchesPublicOrigin = (req: IncomingMessage, publicOrigin: stri
   requestOrigin(req, publicOrigin, useTls) !== undefined
 
 /** Require a valid Host, and if present an Origin with identical scheme, host and port. */
-export function originMatchesHost(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean {
+function originMatchesHost(req: IncomingMessage, publicOrigin: string, useTls: boolean): boolean {
   const expected = requestOrigin(req, publicOrigin, useTls)
   if (!expected) return false
   const origin = req.headers.origin

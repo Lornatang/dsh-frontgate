@@ -57,7 +57,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): GateHandle {
 }
 
 function start(ctx: Context, config: Partial<Config>, statePath: string, releaseStateLock: () => void): GateHandle {
-  const logger = resolveLogger(ctx)
+  const logger = resolveLogger()
   const cfg: Config = { ...DEFAULTS, ...config }
   const listenHost = String(cfg.listenHost)
   const listenPort = intOr(cfg.listenPort, DEFAULTS.listenPort, 0, 65535)

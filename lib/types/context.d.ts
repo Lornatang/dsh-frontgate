@@ -5,7 +5,6 @@
  * connection service are always present. Declaring the two interfaces here
  * keeps the plugin typed without depending on the host packages at build time.
  */
-import type { Context } from '@deepseek-ai/cordis';
 /** Minimal surface of the harness web server used by the gate. */
 export interface WebServerView {
     /** Host the harness listener is bound to, when the host service exposes it. */
@@ -45,4 +44,4 @@ export interface LogSink {
  * and the web profile installs none of them, so a generated password or a
  * listen address logged there would never reach the operator.
  */
-export declare function resolveLogger(ctx: Context): LogSink;
+export declare function resolveLogger(): LogSink;
