@@ -34,7 +34,13 @@ export function cookieValue(header: string | string[] | undefined, name: string)
 export function clientIp(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const forwarded = req.headers['x-forwarded-for']
-    if (typeof forwarded === 'string' && forwarded) return (forwarded.split(',')[0] ?? '').trim().slice(0, 64)
+    if (typeof forwarded === 'string' && forwarded) {
+      // The proxy appends to this header, so the first hop is client
+      // controlled; a value that is not an IP address must not become the
+      // lockout key (or an empty first hop erase the real peer address).
+      const first = (forwarded.split(',')[0] ?? '').trim()
+      if (isIP(first)) return first
+    }
   }
   return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '') || 'unknown'
 }

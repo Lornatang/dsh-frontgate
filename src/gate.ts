@@ -213,6 +213,9 @@ export function createHandler(options: GateOptions): (req: IncomingMessage, res:
     if (!hostMatchesPublicOrigin(req, publicOrigin, useTls)) return text(res, 403, 'invalid host\n')
     if (path === '/__gate/login') return handleLogin(req, res, search)
     if (path === '/__gate/logout') {
+      if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
+        return text(res, 405, 'method not allowed\n', { allow: 'GET, HEAD, POST' })
+      }
       if (!sameOrigin(req, publicOrigin, useTls)) return text(res, 403, 'forbidden\n')
       const token = cookieValue(req.headers.cookie, COOKIE)
       if (token && validSession(token)) {

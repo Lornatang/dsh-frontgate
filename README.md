@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-The npm registry and the GitHub release both carry 0.1.10. To install the GitHub archive directly, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.10/lornatang-dsh-frontgate-0.1.10.tgz` or run `install.sh` from this release.
+The npm registry and the GitHub release both carry 0.1.11. To install the GitHub archive directly, use `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.11/lornatang-dsh-frontgate-0.1.11.tgz` or run `install.sh` from this release.
 
 The `add` command composes the layer into the profile: its `cordis.patch.yml` gains an insert entry, row id `frontgate`, whose `config` starts from the loopback defaults below. A package whose manifest omits the `dsh.bundle.patch` declaration fails this step instead of silently mounting nothing. Restart DSH after installing, then open <http://127.0.0.1:3090> and sign in.
 
@@ -50,7 +50,7 @@ Save it as it appears: only its scrypt hash reaches the state file, and the plai
 
 ### What you get
 
-The layer adds no model tools and no client UI rows: it owns the transport in front of the harness. A profile with it gains a sign-in page at `/__gate/login`, the matching `POST /__gate/login`, `POST /__gate/logout` and `GET /__gate/health` routes, and one signed session cookie (`dsh_gate`) that every proxied request must carry. Unauthenticated API calls receive `401 {"error":"unauthorized"}` with a login hint; every other path redirects to the login page with a `next` target. Unknown `/__gate/*` paths are answered by the gate and never proxied.
+The layer adds no model tools and no client UI rows: it owns the transport in front of the harness. A profile with it gains a sign-in page at `/__gate/login`, the matching `POST /__gate/login`, `GET|POST /__gate/logout` and `GET /__gate/health` routes, and one signed session cookie (`dsh_gate`) that every proxied request must carry. Unauthenticated API calls receive `401 {"error":"unauthorized"}` with a login hint; every other path redirects to the login page with a `next` target. Unknown `/__gate/*` paths are answered by the gate and never proxied.
 
 Everything the profile already offered stays the same behind the gate: the Web GUI, the session API and the WebSocket streams are proxied to the harness origin once the cookie checks out, with hop-by-hop headers dropped and the harness launch cookie exchanged server-side.
 

@@ -34,7 +34,7 @@ dsh plugin --profile web add @lornatang/dsh-frontgate
 dsh plugin --profile web remove @lornatang/dsh-frontgate
 ```
 
-npm 仓库与 GitHub Release 均已发布 0.1.10。如需直接安装 GitHub 归档，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.10/lornatang-dsh-frontgate-0.1.10.tgz`，或运行本版本的 `install.sh`。
+npm 仓库与 GitHub Release 均已发布 0.1.11。如需直接安装 GitHub 归档，请运行 `dsh plugin --profile web add https://github.com/Lornatang/dsh-frontgate/releases/download/v0.1.11/lornatang-dsh-frontgate-0.1.11.tgz`，或运行本版本的 `install.sh`。
 
 `add` 会把这一层组合进 profile：它的 `cordis.patch.yml` 中新增一条 insert 条目，row id 为 `frontgate`，其 `config` 以下面的回环默认值为起点。清单中没有 `dsh.bundle.patch` 声明的包会在这一步失败，而不是静默地什么都不挂载。安装后重启 DSH，再打开 <http://127.0.0.1:3090> 登录。
 
@@ -50,7 +50,7 @@ npm 仓库与 GitHub Release 均已发布 0.1.10。如需直接安装 GitHub 归
 
 ### 你会得到什么
 
-这一层不添加任何模型工具，也不添加客户端 UI 行：它接管的是 harness 前面的传输。装入后 profile 会得到 `/__gate/login` 登录页、配套的 `POST /__gate/login`、`POST /__gate/logout` 与 `GET /__gate/health` 路由，以及一枚每个被代理请求都必须携带的签名会话 Cookie（`dsh_gate`）。未认证的 API 请求收到 `401 {"error":"unauthorized"}` 与登录提示，其余路径重定向到登录页并带上 `next` 目标。未知的 `/__gate/*` 路径由门禁直接应答，永远不会被代理。
+这一层不添加任何模型工具，也不添加客户端 UI 行：它接管的是 harness 前面的传输。装入后 profile 会得到 `/__gate/login` 登录页、配套的 `POST /__gate/login`、`GET|POST /__gate/logout` 与 `GET /__gate/health` 路由，以及一枚每个被代理请求都必须携带的签名会话 Cookie（`dsh_gate`）。未认证的 API 请求收到 `401 {"error":"unauthorized"}` 与登录提示，其余路径重定向到登录页并带上 `next` 目标。未知的 `/__gate/*` 路径由门禁直接应答，永远不会被代理。
 
 profile 原本提供的东西在门禁之后保持不变：Cookie 校验通过后，Web GUI、会话 API 与 WebSocket 流都被代理到 harness 源站，逐跳头会被丢弃，harness 的 launch cookie 在服务端完成交换。
 

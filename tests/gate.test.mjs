@@ -15,7 +15,7 @@ import { apply, Config, hashPassword, injectPolyfill, verifyPassword } from '../
 const PASSWORD = 'correct horse battery staple'
 const HASH = hashPassword(PASSWORD)
 
-function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
+function startUpstream({ hangExchanges = 0, delayExchangeMs = 0, badExchanges = 0 } = {}) {
   return new Promise((resolve) => {
     const seen = []
     const sockets = new Set()
@@ -27,6 +27,11 @@ function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
       seen.push({ method: req.method, url: req.url, headers: req.headers })
       if (req.url.startsWith('/?token=')) {
         if (hangExchanges > 0) { hangExchanges -= 1; return }
+        if (badExchanges > 0) {
+          badExchanges -= 1
+          res.writeHead(500, { 'set-cookie': 'dsh-auth=poison; Path=/; HttpOnly' })
+          return res.end()
+        }
         const respond = () => {
           if (res.destroyed) return
           res.writeHead(303, { 'set-cookie': 'dsh-auth=' + currentCookie + '; Path=/; HttpOnly', location: './' })
@@ -65,6 +70,10 @@ function startUpstream({ hangExchanges = 0, delayExchangeMs = 0 } = {}) {
       }
       if (req.url === '/redirect-relative') {
         res.writeHead(302, { location: 'http://127.0.0.1:' + port + '//evil.example/target' })
+        return res.end()
+      }
+      if (req.url === '/redirect-bare-relative') {
+        res.writeHead(302, { location: '//evil.example/target' })
         return res.end()
       }
       if (req.url === '/redirect-query') {
@@ -468,6 +477,14 @@ test('protocol-relative upstream Locations stay on site', async (t) => {
   assert.equal(headers.get('location'), '/')
 })
 
+test('bare protocol-relative upstream Locations stay on site', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const { res, headers } = await request(gate.port, '/redirect-bare-relative', { headers: { cookie } })
+  assert.equal(res.status, 302)
+  assert.equal(headers.get('location'), '/')
+})
+
 test('self-origin query and fragment Locations are rewritten to paths', async (t) => {
   const { gate } = await withGate(t)
   const { cookie } = await login(gate.port)
@@ -687,6 +704,24 @@ test('lockout rejects all passwords until the window expires, per client', async
   const now = Date.now()
   t.mock.method(Date, 'now', () => now + 61000)
   assert.equal((await login(gate.port, PASSWORD)).res.status, 303)
+})
+
+test('invalid or empty forwarded hops fall back to the peer address', async (t) => {
+  const { gate } = await withGate(t, { trustProxy: true })
+  const { cookie } = await login(gate.port)
+  for (const forwarded of ['not-an-ip', ', 203.0.113.9', '']) {
+    const { body } = await request(gate.port, '/api/sessions', { headers: { cookie, 'x-forwarded-for': forwarded } })
+    assert.equal(JSON.parse(body).xff, '127.0.0.1')
+  }
+})
+
+test('logout rejects methods other than GET, HEAD and POST', async (t) => {
+  const { gate } = await withGate(t)
+  const { cookie } = await login(gate.port)
+  const { res, headers } = await request(gate.port, '/__gate/logout', { method: 'DELETE', headers: { cookie } })
+  assert.equal(res.status, 405)
+  assert.equal(headers.get('allow'), 'GET, HEAD, POST')
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
 })
 
 test('concurrent login attempts from one client cannot bypass the lockout', async (t) => {
@@ -1206,6 +1241,21 @@ test('a timed-out harness exchange returns 503 and the next request retries', as
   assert.deepEqual(failed.map((result) => result.res.status), [503, 503])
   assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 1)
   assert.equal((await request(gate.port, '/api/sessions', options)).res.status, 200)
+  assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 2)
+})
+
+test('a failed harness exchange does not cache the error cookie', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
+  const upstream = await startUpstream({ badExchanges: 1 })
+  const gate = await startGate(upstream.port, dir)
+  t.after(async () => { gate.dispose(); await upstream.close(); rmSync(dir, { recursive: true, force: true }) })
+  const { cookie } = await login(gate.port)
+  const first = await request(gate.port, '/api/sessions', { headers: { cookie } })
+  assert.equal(first.res.status, 503)
+  assert.equal(upstream.seen.filter((entry) => entry.url === '/api/sessions').length, 0)
+  const second = await request(gate.port, '/api/sessions', { headers: { cookie } })
+  assert.equal(second.res.status, 200)
+  assert.equal(JSON.parse(second.body).cookie, 'dsh-auth=launch-token')
   assert.equal(upstream.seen.filter((entry) => entry.url.startsWith('/?token=')).length, 2)
 })
 

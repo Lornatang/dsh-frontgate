@@ -230,6 +230,11 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   let shuttingDown = false
 
   function track(connection: Duplex | ServerResponse, token: string): boolean {
+    // Node never re-emits 'close' for a connection that is already destroyed,
+    // so installing the close listener (and arming the expiry timer) would
+    // leak both the map entry and a self-rearming timer until the session
+    // itself expires.
+    if (connection.destroyed) return false
     const expiresAt = Number(token.split('.')[2]) * 1000
     const entry: { digest: string; timer?: NodeJS.Timeout } = { digest: sessionDigest(token) }
     active.set(connection, entry)

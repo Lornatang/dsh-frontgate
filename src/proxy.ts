@@ -110,6 +110,14 @@ export function createProxy(options: ProxyOptions): Proxy {
         ...tlsOptions,
       }, (res) => {
         res.resume()
+        // Only a successful bootstrap may hand out a harness cookie: a 4xx/5xx
+        // error or login page can still set one, and caching it would serve
+        // that page's cookie to every later session for HARNESS_COOKIE_TTL.
+        const status = res.statusCode ?? 0
+        if (status < 200 || status >= 400) {
+          finish(new Error('launch-token exchange returned ' + res.statusCode))
+          return
+        }
         const lines = res.headers['set-cookie'] || []
         const cookie = lines.map((line) => line.split(';')[0]).filter(Boolean).join('; ')
         if (!cookie) finish(new Error('launch-token exchange returned ' + res.statusCode + ' without set-cookie'))
@@ -163,6 +171,10 @@ export function createProxy(options: ProxyOptions): Proxy {
   }
 
   function rewriteLocation(value: string): string {
+    // A bare protocol-relative Location ('//host', '/\\host') is resolved by
+    // the browser against the current scheme and leaves this origin; only the
+    // target-origin-prefixed form was normalised before.
+    if (value.startsWith('//') || value.startsWith('/\\')) return '/'
     if (!value.startsWith(targetOrigin)) return value
     const rest = value.slice(targetOrigin.length)
     if (rest === '') return '/'

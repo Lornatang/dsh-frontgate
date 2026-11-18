@@ -90,24 +90,81 @@ export function tightenState(path: string): boolean {
   return true
 }
 
+/** Bounded synchronous pause used by the Windows rename retry. */
+function pause(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    const until = Date.now() + ms
+    while (Date.now() < until) { /* busy wait */ }
+  }
+}
+
+/**
+ * Replace one state file. Windows virus scanners, indexers and backup tools
+ * can hold a handle on the destination for a few milliseconds; a single
+ * rename would then fail with EPERM/EACCES/EBUSY and leave the session
+ * unrevokeable (logout answers 503).
+ */
+function renameStateFile(from: string, to: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (process.platform !== 'win32' || attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '')) throw err
+      pause(20)
+    }
+  }
+}
+
+/** Make the rename durable by syncing the parent directory (POSIX only). */
+function syncParent(path: string): void {
+  if (process.platform === 'win32') return
+  let fd: number | undefined
+  try {
+    fd = openSync(dirname(path), 'r')
+    fsyncSync(fd)
+  } catch {
+    // Best effort: some filesystems refuse directory fsync.
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* ignore */ }
+    }
+  }
+}
+
 /** Write a complete owner-only temporary file, then replace the old state. */
 export function writeState(path: string, value: State): void {
   mkdirSync(dirname(path), { recursive: true })
   const temporary = path + '.' + randomBytes(12).toString('hex') + '.tmp'
   let fd: number | undefined
+  let failure: unknown
   try {
     fd = openSync(temporary, 'wx', 0o600)
     writeFileSync(fd, JSON.stringify(value, null, 2) + '\n')
     fsyncSync(fd)
     closeSync(fd)
     fd = undefined
-    renameSync(temporary, path)
+    renameStateFile(temporary, path)
+    syncParent(path)
+  } catch (err) {
+    failure = err
   } finally {
-    if (fd !== undefined) closeSync(fd)
-    try { unlinkSync(temporary) } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch (err) {
+        if (failure === undefined) failure = err
+      }
+    }
+    try {
+      unlinkSync(temporary)
+    } catch (err) {
+      // Never let cleanup mask the real write failure.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT' && failure === undefined) failure = err
     }
   }
+  if (failure !== undefined) throw failure
 }
 
 /** Resolve the state path for the profile the plugin was loaded from. */
