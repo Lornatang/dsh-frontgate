@@ -4,7 +4,7 @@
  * Sessions are HMAC tokens bound to the current password hash. Revocation is
  * tracked separately by the session store.
  */
-import { createHash, createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, scrypt, scryptSync, timingSafeEqual } from 'node:crypto'
 
 /** Name of the session cookie. */
 export const COOKIE = 'dsh_gate'
@@ -122,11 +122,12 @@ export function randomPassword(): string {
   return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12) + '-' + out.slice(12, 16)
 }
 
-/** Stable, non-reversible tag of the password hash; embedded in every session. */
-export const passwordVersion = (passwordHash: string): string =>
-  createHash('sha256').update(passwordHash).digest('base64url').slice(0, 12)
+/** Random per-install session epoch. It is stored in the state file and
+ * regenerated whenever the password changes, so old cookies stop verifying
+ * without putting any password-derived value into the cookie. */
+export const newSessionEpoch = (): string => randomBytes(16).toString('base64url')
 
-/** Create a signed session token: v1.issuedAt.expiresAt.nonce.passwordVersion.mac. */
+/** Create a signed session token: v1.issuedAt.expiresAt.nonce.sessionEpoch.mac. */
 export function signToken(secret: string, pv: string, ttlSeconds: number): string {
   const now = Math.floor(Date.now() / 1000)
   const body =

@@ -22,6 +22,8 @@ export interface RevokedSession {
 export interface State {
   passwordHash?: string
   secret?: string
+  /** Random tag bound into signed sessions; changes with the password. */
+  sessionEpoch?: string
   createdAt?: string
   revokedSessions?: RevokedSession[]
 }
@@ -54,6 +56,10 @@ export function readState(path: string, mustExist = false): State {
     const state = value as State
     if (!validPasswordHash(state.passwordHash) || typeof state.secret !== 'string' || state.secret.length < 64) {
       throw new Error('invalid credentials')
+    }
+    if (state.sessionEpoch !== undefined &&
+        (typeof state.sessionEpoch !== 'string' || !/^[A-Za-z0-9_-]{16,43}$/.test(state.sessionEpoch))) {
+      throw new Error('invalid session epoch')
     }
     if (state.revokedSessions !== undefined &&
         (!Array.isArray(state.revokedSessions) || state.revokedSessions.length > MAX_REVOKED_SESSIONS ||

@@ -27,9 +27,11 @@ export declare function verifyPassword(password: string, stored: unknown): Promi
 export declare function verifyPasswordSync(password: string, stored: unknown): boolean;
 /** Random password shown once when no password is configured. */
 export declare function randomPassword(): string;
-/** Stable, non-reversible tag of the password hash; embedded in every session. */
-export declare const passwordVersion: (passwordHash: string) => string;
-/** Create a signed session token: v1.issuedAt.expiresAt.nonce.passwordVersion.mac. */
+/** Random per-install session epoch. It is stored in the state file and
+ * regenerated whenever the password changes, so old cookies stop verifying
+ * without putting any password-derived value into the cookie. */
+export declare const newSessionEpoch: () => string;
+/** Create a signed session token: v1.issuedAt.expiresAt.nonce.sessionEpoch.mac. */
 export declare function signToken(secret: string, pv: string, ttlSeconds: number): string;
 /** Verify signature, version, password binding and expiry in constant time. */
 export declare function verifyToken(secret: string, pv: string, token: string | undefined): boolean;

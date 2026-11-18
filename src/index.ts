@@ -15,7 +15,7 @@ import type { AddressInfo, Socket } from 'node:net'
 import type { Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import { Config, DEFAULTS } from './config.ts'
-import { COOKIE, assertStrongPassword, hashPassword, passwordVersion, randomPassword, validPasswordHash } from './auth.ts'
+import { COOKIE, assertStrongPassword, hashPassword, newSessionEpoch, randomPassword, validPasswordHash } from './auth.ts'
 import { resolveLogger } from './context.ts'
 import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, rejectUpgrade, sameOrigin, text } from './http.ts'
 import { injectPolyfill } from './polyfill.ts'
@@ -114,12 +114,12 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   const passwordChanged = stateExists && state.passwordHash !== passwordHash
   const secret = !passwordChanged && typeof state.secret === 'string' && state.secret.length >= 64
     ? state.secret : randomBytes(32).toString('hex')
-  const pv = passwordVersion(passwordHash)
+  const pv = !passwordChanged && typeof state.sessionEpoch === 'string' ? state.sessionEpoch : newSessionEpoch()
   const persistedState = {
-    passwordHash, secret, createdAt: state.createdAt || new Date().toISOString(),
+    passwordHash, secret, sessionEpoch: pv, createdAt: state.createdAt || new Date().toISOString(),
     revokedSessions: passwordChanged ? [] : state.revokedSessions ?? [],
   }
-  if (state.passwordHash !== passwordHash || state.secret !== secret) {
+  if (state.passwordHash !== passwordHash || state.secret !== secret || state.sessionEpoch !== pv) {
     writeState(statePath, persistedState)
     // persistedState.revokedSessions already merges the journal (or is empty
     // after a password change), so the journal records are now redundant.

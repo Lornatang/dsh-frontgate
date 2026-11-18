@@ -1058,7 +1058,7 @@ test('a websocket closes when its signed session expires', async (t) => {
   const { gate, dir } = await withGate(t)
   const state = JSON.parse(readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8'))
   const now = Math.floor(Date.now() / 1000)
-  const pv = createHash('sha256').update(HASH).digest('base64url').slice(0, 12)
+  const pv = state.sessionEpoch
   const body = ['v1', now, now + 2, randomBytes(16).toString('base64url'), pv].join('.')
   const cookie = 'dsh_gate=' + body + '.' + createHmac('sha256', state.secret).update(body).digest('base64url')
   const ws = await openWebSocket(gate.port, cookie)
@@ -1071,7 +1071,7 @@ test('an HTTP stream closes at session expiry without closing another session', 
   const { gate, upstream, dir } = await withGate(t)
   const state = JSON.parse(readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8'))
   const now = Math.floor(Date.now() / 1000)
-  const pv = createHash('sha256').update(HASH).digest('base64url').slice(0, 12)
+  const pv = state.sessionEpoch
   const body = ['v1', now, now + 3, randomBytes(16).toString('base64url'), pv].join('.')
   const expiring = 'dsh_gate=' + body + '.' + createHmac('sha256', state.secret).update(body).digest('base64url')
   const other = (await login(gate.port)).cookie
@@ -1524,7 +1524,7 @@ test('cross-origin websocket upgrades are refused', async (t) => {
   same.socket.destroy()
 })
 
-test('startup preserves existing state and tightens POSIX permissions', async (t) => {
+test('startup preserves existing credentials and tightens POSIX permissions', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'frontgate-'))
   const dataDir = join(dir, 'data')
   mkdirSync(dataDir, { recursive: true })
@@ -1541,7 +1541,14 @@ test('startup preserves existing state and tightens POSIX permissions', async (t
     rmSync(dir, { recursive: true, force: true })
   })
   assert.equal(statSync(statePath).mode & 0o777, process.platform === 'win32' ? previousMode : 0o600)
-  assert.equal(readFileSync(statePath, 'utf8'), original)
+  // A legacy state file gains a random session epoch, but its credentials,
+  // creation time and revocations must survive the rewrite untouched.
+  const after = JSON.parse(readFileSync(statePath, 'utf8'))
+  const before = JSON.parse(original)
+  assert.equal(after.passwordHash, before.passwordHash)
+  assert.equal(after.secret, before.secret)
+  assert.match(after.sessionEpoch, /^[A-Za-z0-9_-]{16,43}$/)
+  assert.equal(after.revokedSessions.length, 0)
   assert.equal((await login(gate.port)).res.status, 303)
 })
 

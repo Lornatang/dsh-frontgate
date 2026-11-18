@@ -33,7 +33,7 @@ export function createSessionStore(path: string, state: State, pv: string, onRev
     // Reload so a stale instance cannot overwrite a newer password or secret.
     if (!tightenState(path)) throw new Error('state file is missing')
     const latest = readState(path, true)
-    if (latest.secret !== secret || latest.passwordHash !== passwordHash) {
+    if (latest.secret !== secret || latest.passwordHash !== passwordHash || latest.sessionEpoch !== pv) {
       throw new Error('state changed; restart the gate before signing out')
     }
     const now = Math.floor(Date.now() / 1000)

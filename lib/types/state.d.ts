@@ -8,6 +8,8 @@ export interface RevokedSession {
 export interface State {
     passwordHash?: string;
     secret?: string;
+    /** Random tag bound into signed sessions; changes with the password. */
+    sessionEpoch?: string;
     createdAt?: string;
     revokedSessions?: RevokedSession[];
 }
