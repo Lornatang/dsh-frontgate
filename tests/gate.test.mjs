@@ -531,7 +531,11 @@ test('logout revokes only that session, including across restart', async (t) => 
   assert.equal((await request(first.port, '/api/sessions', { headers: { cookie: session2 } })).res.status, 200)
   const saved = readFileSync(join(dir, 'data', 'dsh-frontgate.json'), 'utf8')
   assert.ok(!saved.includes(session1))
-  assert.equal(JSON.parse(saved).revokedSessions.length, 1)
+  // Logout appends to the durable revocation journal instead of rewriting the
+  // whole state file; the journal holds only digests, never the cookie value.
+  const journal = readFileSync(join(dir, 'data', 'dsh-frontgate.json.revocations'), 'utf8')
+  assert.ok(!journal.includes(session1))
+  assert.equal(journal.split('\n').filter(Boolean).length, 1)
   first.dispose()
   second = await startGate(upstream.port, dir)
   assert.equal((await request(second.port, '/api/sessions', { headers: { cookie: session1 } })).res.status, 401)

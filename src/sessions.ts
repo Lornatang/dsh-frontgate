@@ -1,7 +1,7 @@
 /** Persistent, bounded revocation for signed session cookies. */
 import { createHash } from 'node:crypto'
 import { verifyToken } from './auth.ts'
-import { MAX_REVOKED_SESSIONS, readState, tightenState, writeState } from './state.ts'
+import { MAX_REVOCATION_JOURNAL_BYTES, MAX_REVOKED_SESSIONS, appendRevocation, compactRevocations, readState, tightenState } from './state.ts'
 import type { State } from './state.ts'
 
 /** Store only a digest, never the bearer token itself. */
@@ -44,8 +44,15 @@ export function createSessionStore(path: string, state: State, pv: string, onRev
     if (next.size > MAX_REVOKED_SESSIONS || (!next.has(digest) && next.size >= MAX_REVOKED_SESSIONS)) {
       throw new Error('revocation store is full')
     }
-    next.set(digest, Number(token.split('.')[2]))
-    writeState(path, { ...latest, revokedSessions: [...next].map(([digest, expires]) => ({ digest, expires })) })
+    const expires = Number(token.split('.')[2])
+    // Durable before success: the journal append is fsynced. Rewriting the
+    // whole state file for every logout is only needed when the journal grows
+    // past its bound, at which point it is compacted back into the state.
+    const journalBytes = appendRevocation(path, { digest, expires })
+    next.set(digest, expires)
+    if (journalBytes > MAX_REVOCATION_JOURNAL_BYTES) {
+      compactRevocations(path, latest, [...next].map(([digest, expires]) => ({ digest, expires })))
+    }
     revoked = next
     onRevoke(digest)
     return true

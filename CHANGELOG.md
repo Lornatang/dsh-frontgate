@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 - 2026-11-19
+
+- Append logout revocations to a small fsync'd journal instead of rewriting the whole state file per sign-out; the journal is merged back on read and compacted into the main state when it grows.
+- Keep the durable-before-success ordering and the maximum revoked-session bound.
+
 ## 0.1.12 - 2026-11-19
 
 - Stop passing an unused context to the logger resolver and stop exporting the internal origin/host matcher.

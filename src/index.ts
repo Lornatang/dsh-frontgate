@@ -21,7 +21,7 @@ import { cookieValue, intOr, isLoopbackHost, normalizePublicOrigin, rejectUpgrad
 import { injectPolyfill } from './polyfill.ts'
 import { createProxy } from './proxy.ts'
 import { createHandler } from './gate.ts'
-import { hashFor, readState, statePathFor, tightenState, writeState } from './state.ts'
+import { clearRevocationJournal, hashFor, readState, statePathFor, tightenState, writeState } from './state.ts'
 import { acquireStateLock } from './state-lock.ts'
 import { createSessionStore, sessionDigest } from './sessions.ts'
 
@@ -121,6 +121,9 @@ function start(ctx: Context, config: Partial<Config>, statePath: string, release
   }
   if (state.passwordHash !== passwordHash || state.secret !== secret) {
     writeState(statePath, persistedState)
+    // persistedState.revokedSessions already merges the journal (or is empty
+    // after a password change), so the journal records are now redundant.
+    clearRevocationJournal(statePath)
   }
   if (generatedPassword) {
     logger.info('no password configured - generated a random one and saved its hash to ' + statePath)

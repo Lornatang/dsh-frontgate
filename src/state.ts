@@ -4,7 +4,7 @@
  * The file sits next to the profile's cordis.patch.yml, is created with mode
  * 0600 and holds no plain-text password.
  */
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -26,6 +26,19 @@ export interface State {
   revokedSessions?: RevokedSession[]
 }
 
+/** Append-only revocation journal next to the state file. */
+export const MAX_REVOCATION_JOURNAL_BYTES = 256 * 1024
+
+function revocationPath(path: string): string {
+  return path + '.revocations'
+}
+
+function validRevokedSession(value: unknown): value is RevokedSession {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value) &&
+    typeof (value as RevokedSession).digest === 'string' && /^[A-Za-z0-9_-]{43}$/.test((value as RevokedSession).digest) &&
+    Number.isSafeInteger((value as RevokedSession).expires) && (value as RevokedSession).expires > 0
+}
+
 /** Read existing state without replacing malformed or inaccessible credentials. */
 export function readState(path: string, mustExist = false): State {
   let data: string
@@ -44,11 +57,26 @@ export function readState(path: string, mustExist = false): State {
     }
     if (state.revokedSessions !== undefined &&
         (!Array.isArray(state.revokedSessions) || state.revokedSessions.length > MAX_REVOKED_SESSIONS ||
-         state.revokedSessions.some((entry) => !entry || typeof entry !== 'object' ||
-           typeof entry.digest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(entry.digest) ||
-           !Number.isSafeInteger(entry.expires) || entry.expires <= 0))) {
+         state.revokedSessions.some((entry) => !validRevokedSession(entry)))) {
       throw new Error('invalid revoked sessions')
     }
+    let journal: string
+    try {
+      journal = readFileSync(revocationPath(path), 'utf8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return state
+      throw new Error('dsh-frontgate: cannot read revocation journal for ' + path, { cause: err })
+    }
+    const merged = [...(state.revokedSessions ?? [])]
+    for (const line of journal.split('\n')) {
+      if (!line) continue
+      let entry: unknown
+      try { entry = JSON.parse(line) } catch { throw new Error('invalid revocation journal') }
+      if (!validRevokedSession(entry)) throw new Error('invalid revocation journal')
+      merged.push(entry)
+    }
+    if (merged.length > MAX_REVOKED_SESSIONS) throw new Error('invalid revocation journal')
+    state.revokedSessions = merged
     return state
   } catch (err) {
     throw new Error('dsh-frontgate: invalid state file ' + path + '; restore it from a backup before restarting', { cause: err })
@@ -165,6 +193,46 @@ export function writeState(path: string, value: State): void {
     }
   }
   if (failure !== undefined) throw failure
+}
+
+/**
+ * Append one revocation record and return the journal size in bytes.
+ *
+ * Appending and fsyncing the journal is much cheaper than rewriting the whole
+ * state file (which can hold thousands of revocations) on every logout, while
+ * still being durable before logout success is reported. The journal is merged
+ * into the state on read and compacted back into it when it grows large.
+ */
+export function appendRevocation(path: string, entry: RevokedSession): number {
+  const journal = revocationPath(path)
+  const existed = tightenState(journal)
+  const fd = openSync(journal, 'a', 0o600)
+  try {
+    writeFileSync(fd, JSON.stringify(entry) + '\n')
+    fsyncSync(fd)
+    if (!existed) syncParent(journal)
+    return fstatSync(fd).size
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Remove the journal once its records are durable in the state file. */
+export function clearRevocationJournal(path: string): void {
+  const journal = revocationPath(path)
+  try {
+    unlinkSync(journal)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw new Error('dsh-frontgate: cannot remove revocation journal for ' + path, { cause: err })
+  }
+  syncParent(journal)
+}
+
+/** Fold journal records into the state file, then drop the journal. */
+export function compactRevocations(path: string, base: State, entries: RevokedSession[]): void {
+  writeState(path, { ...base, revokedSessions: entries })
+  clearRevocationJournal(path)
 }
 
 /** Resolve the state path for the profile the plugin was loaded from. */
