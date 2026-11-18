@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14 - 2026-11-19
+
+- Replace the password-derived session cookie value with a random per-install epoch persisted beside the password hash and regenerated when the password changes, so no password-derived value is signed or stored in the cookie (clears the js/insufficient-password-hash and js/clear-text-storage-of-sensitive-data findings).
+- Invalidate revoked sessions by comparing epochs and keep stored credentials when a saved state already carries an epoch.
+
 ## 0.1.13 - 2026-11-19
 
 - Append logout revocations to a small fsync'd journal instead of rewriting the whole state file per sign-out; the journal is merged back on read and compacted into the main state when it grows.
