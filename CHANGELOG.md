@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 - 2026-11-19
+
+- Use the same rules for reading and appending session revocations, including expired entries and interrupted journal compaction.
+- Apply revocation and close live connections immediately after the durable logout commit.
+
 ## 0.1.14 - 2026-11-19
 
 - Replace the password-derived session cookie value with a random per-install epoch persisted beside the password hash and regenerated when the password changes, so no password-derived value is signed or stored in the cookie (clears the js/insufficient-password-hash and js/clear-text-storage-of-sensitive-data findings).
