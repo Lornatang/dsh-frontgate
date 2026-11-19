@@ -4,13 +4,13 @@
  * The file sits next to the profile's cordis.patch.yml, is created with mode
  * 0600 and holds no plain-text password.
  */
-import { chmodSync, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { hashPassword, validPasswordHash, verifyPasswordSync } from './auth.ts'
 
-/** Bound persistent logout revocations; expired entries are pruned on logout. */
+/** Bound live, distinct logout revocations across the state and journal. */
 export const MAX_REVOKED_SESSIONS = 10000
 
 export interface RevokedSession {
@@ -28,7 +28,7 @@ export interface State {
   revokedSessions?: RevokedSession[]
 }
 
-/** Append-only revocation journal next to the state file. */
+/** Maximum size of the append-only revocation journal next to the state file. */
 export const MAX_REVOCATION_JOURNAL_BYTES = 256 * 1024
 
 function revocationPath(path: string): string {
@@ -41,8 +41,24 @@ function validRevokedSession(value: unknown): value is RevokedSession {
     Number.isSafeInteger((value as RevokedSession).expires) && (value as RevokedSession).expires > 0
 }
 
+/** Validate every record and keep the longest live expiry for each digest. */
+export function mergeRevocation(entries: Map<string, number>, entry: unknown, now: number): void {
+  if (!validRevokedSession(entry)) throw new Error('invalid revoked session')
+  const { digest, expires } = entry
+  if (expires <= now) return
+  const previous = entries.get(digest)
+  if (previous === undefined && entries.size >= MAX_REVOKED_SESSIONS) {
+    throw new Error('revocation store is full')
+  }
+  if (previous === undefined || expires > previous) entries.set(digest, expires)
+}
+
+export function revocationRecords(entries: ReadonlyMap<string, number>): RevokedSession[] {
+  return Array.from(entries, ([digest, expires]) => ({ digest, expires }))
+}
+
 /** Read existing state without replacing malformed or inaccessible credentials. */
-export function readState(path: string, mustExist = false): State {
+export function readState(path: string, mustExist = false, now = Math.floor(Date.now() / 1000)): State {
   let data: string
   try {
     data = readFileSync(path, 'utf8')
@@ -61,28 +77,26 @@ export function readState(path: string, mustExist = false): State {
         (typeof state.sessionEpoch !== 'string' || !/^[A-Za-z0-9_-]{16,43}$/.test(state.sessionEpoch))) {
       throw new Error('invalid session epoch')
     }
-    if (state.revokedSessions !== undefined &&
-        (!Array.isArray(state.revokedSessions) || state.revokedSessions.length > MAX_REVOKED_SESSIONS ||
-         state.revokedSessions.some((entry) => !validRevokedSession(entry)))) {
+    if (state.revokedSessions !== undefined && !Array.isArray(state.revokedSessions)) {
       throw new Error('invalid revoked sessions')
     }
-    let journal: string
+    const merged = new Map<string, number>()
+    for (const entry of state.revokedSessions ?? []) mergeRevocation(merged, entry, now)
+    let journal = ''
     try {
       journal = readFileSync(revocationPath(path), 'utf8')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return state
-      throw new Error('dsh-frontgate: cannot read revocation journal for ' + path, { cause: err })
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error('dsh-frontgate: cannot read revocation journal for ' + path, { cause: err })
+      }
     }
-    const merged = [...(state.revokedSessions ?? [])]
     for (const line of journal.split('\n')) {
       if (!line) continue
       let entry: unknown
       try { entry = JSON.parse(line) } catch { throw new Error('invalid revocation journal') }
-      if (!validRevokedSession(entry)) throw new Error('invalid revocation journal')
-      merged.push(entry)
+      mergeRevocation(merged, entry, now)
     }
-    if (merged.length > MAX_REVOKED_SESSIONS) throw new Error('invalid revocation journal')
-    state.revokedSessions = merged
+    state.revokedSessions = revocationRecords(merged)
     return state
   } catch (err) {
     throw new Error('dsh-frontgate: invalid state file ' + path + '; restore it from a backup before restarting', { cause: err })
@@ -202,24 +216,40 @@ export function writeState(path: string, value: State): void {
 }
 
 /**
- * Append one revocation record and return the journal size in bytes.
+ * Append and sync one revocation record, or return false if compaction must
+ * free space before this record can be appended.
  *
  * Appending and fsyncing the journal is much cheaper than rewriting the whole
  * state file (which can hold thousands of revocations) on every logout, while
  * still being durable before logout success is reported. The journal is merged
  * into the state on read and compacted back into it when it grows large.
  */
-export function appendRevocation(path: string, entry: RevokedSession): number {
+export function appendRevocation(path: string, entry: RevokedSession): boolean {
   const journal = revocationPath(path)
-  const existed = tightenState(journal)
+  const record = JSON.stringify(entry) + '\n'
+  tightenState(journal)
   const fd = openSync(journal, 'a', 0o600)
   try {
-    writeFileSync(fd, JSON.stringify(entry) + '\n')
-    fsyncSync(fd)
-    if (!existed) syncParent(journal)
-    return fstatSync(fd).size
+    const size = fstatSync(fd).size
+    if (size + Buffer.byteLength(record) > MAX_REVOCATION_JOURNAL_BYTES) return false
+    try {
+      writeFileSync(fd, record)
+      fsyncSync(fd)
+    } catch (err) {
+      // The profile lock ensures this is the only writer. Preserve earlier
+      // committed records if a short write or sync error interrupts the append.
+      try {
+        ftruncateSync(fd, size)
+        fsyncSync(fd)
+      } catch (rollbackError) {
+        throw new AggregateError([err, rollbackError], 'could not roll back the revocation journal')
+      }
+      throw err
+    }
+    if (size === 0) syncParent(journal)
+    return true
   } finally {
-    closeSync(fd)
+    try { closeSync(fd) } catch { /* fsync determines the commit outcome */ }
   }
 }
 

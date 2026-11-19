@@ -5,7 +5,8 @@ import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -542,6 +543,124 @@ test('logout revokes only that session, including across restart', async (t) => 
   assert.equal((await request(second.port, '/api/sessions', { headers: { cookie: session2 } })).res.status, 200)
 })
 
+function revocationFixture(count, expires) {
+  const bytes = Buffer.alloc(32)
+  return Array.from({ length: count }, (_, index) => {
+    bytes.writeUInt32BE(index)
+    return { digest: bytes.toString('base64url'), expires }
+  })
+}
+
+test('logout and restart work with a full snapshot of expired revocations', async (t) => {
+  const { gate, upstream, dir } = await withGate(t)
+  const path = join(dir, 'data', 'dsh-frontgate.json')
+  const { cookie } = await login(gate.port)
+  const state = JSON.parse(readFileSync(path, 'utf8'))
+  state.revokedSessions = revocationFixture(10000, Math.floor(Date.now() / 1000) - 60)
+  writeFileSync(path, JSON.stringify(state))
+
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  gate.dispose()
+  const restarted = await startGate(upstream.port, dir)
+  try {
+    assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+  } finally {
+    restarted.dispose()
+  }
+})
+
+test('restart merges an interrupted compaction while preserving the longest revocation and capacity', async (t) => {
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const { gate, upstream, dir } = await withGate(t)
+  const path = join(dir, 'data', 'dsh-frontgate.json')
+  const { cookie } = await login(gate.port)
+  const otherCookie = (await login(gate.port)).cookie
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  const state = JSON.parse(readFileSync(path, 'utf8'))
+  const entry = JSON.parse(readFileSync(path + '.revocations', 'utf8'))
+  const shorterExpiry = Math.floor(now / 1000) + 10
+  state.revokedSessions = [...revocationFixture(9999, entry.expires), entry]
+  writeFileSync(path, JSON.stringify(state))
+  writeFileSync(path + '.revocations', JSON.stringify({ ...entry, expires: shorterExpiry }) + '\n')
+
+  gate.dispose()
+  const restarted = await startGate(upstream.port, dir)
+  try {
+    now += 20000
+    assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+    assert.equal((await request(restarted.port, '/__gate/logout', { headers: { cookie: otherCookie } })).res.status, 503)
+    assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie: otherCookie } })).res.status, 200)
+  } finally {
+    restarted.dispose()
+  }
+})
+
+test('logout can retry a failed journal compaction without growing the journal or dropping the stream', async (t) => {
+  const { gate, upstream, dir } = await withGate(t)
+  const path = join(dir, 'data', 'dsh-frontgate.json')
+  const journalPath = path + '.revocations'
+  const { cookie } = await login(gate.port)
+  const stream = await openStream(gate.port, cookie)
+  const expired = revocationFixture(1, Math.floor(Date.now() / 1000) - 60)[0]
+  const line = JSON.stringify(expired) + '\n'
+  const journal = line.repeat(Math.floor((256 * 1024) / line.length))
+  writeFileSync(journalPath, journal, { mode: 0o600 })
+
+  const rename = t.mock.method(fs, 'renameSync', () => { throw new Error('simulated compaction failure') })
+  syncBuiltinESMExports()
+  try {
+    const result = await request(gate.port, '/__gate/logout', { headers: { cookie } })
+    assert.equal(result.res.status, 503)
+    assert.equal(result.cookies.length, 0)
+    assert.equal(readFileSync(journalPath, 'utf8'), journal)
+    assert.equal(stream.closed(), false)
+    assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie } })).res.status, 200)
+  } finally {
+    rename.mock.restore()
+    syncBuiltinESMExports()
+  }
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie } })).res.status, 302)
+  await Promise.race([stream.ended, delay(2000).then(() => { throw new Error('revoked stream stayed open') })])
+  assert.equal(readFileSync(journalPath, 'utf8').trim().split('\n').length, 1)
+  gate.dispose()
+  const restarted = await startGate(upstream.port, dir)
+  try {
+    assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie } })).res.status, 401)
+  } finally {
+    restarted.dispose()
+  }
+})
+
+test('logout rolls back an incomplete journal append and can retry', async (t) => {
+  const { gate, dir } = await withGate(t)
+  const journalPath = join(dir, 'data', 'dsh-frontgate.json.revocations')
+  const firstCookie = (await login(gate.port)).cookie
+  const secondCookie = (await login(gate.port)).cookie
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie: firstCookie } })).res.status, 302)
+  const original = readFileSync(journalPath, 'utf8')
+
+  const write = fs.writeFileSync
+  const failedWrite = t.mock.method(fs, 'writeFileSync', (fd, data) => {
+    write(fd, data.slice(0, 10))
+    throw new Error('simulated partial append')
+  })
+  syncBuiltinESMExports()
+  try {
+    const result = await request(gate.port, '/__gate/logout', { headers: { cookie: secondCookie } })
+    assert.equal(result.res.status, 503)
+    assert.equal(result.cookies.length, 0)
+    assert.equal(readFileSync(journalPath, 'utf8'), original)
+    assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: secondCookie } })).res.status, 200)
+  } finally {
+    failedWrite.mock.restore()
+    syncBuiltinESMExports()
+  }
+  assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie: secondCookie } })).res.status, 302)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 401)
+  assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: secondCookie } })).res.status, 401)
+})
+
 test('a second gate cannot use the same profile or disturb the first gate', async (t) => {
   const { gate, upstream, dir } = await withGate(t)
   const firstCookie = (await login(gate.port)).cookie
@@ -760,6 +879,8 @@ test('a full failure store preserves existing lockouts and recovers when they ex
 })
 
 test('a failure store full of partial counts still admits new clients', async (t) => {
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now)
   const { gate } = await withGate(t, {
     passwordHash: hashPassword(PASSWORD, { N: 1024 }), maxAttempts: 5, lockMinutes: 1, trustProxy: true,
   })
