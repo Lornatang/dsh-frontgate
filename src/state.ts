@@ -4,7 +4,7 @@
  * The file sits next to the profile's cordis.patch.yml, is created with mode
  * 0600 and holds no plain-text password.
  */
-import { chmodSync, closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -90,7 +90,9 @@ export function readState(path: string, mustExist = false, now = Math.floor(Date
         throw new Error('dsh-frontgate: cannot read revocation journal for ' + path, { cause: err })
       }
     }
-    for (const line of journal.split('\n')) {
+    // A crash may leave a final record without its terminating newline.
+    const complete = journal.slice(0, journal.lastIndexOf('\n') + 1)
+    for (const line of complete.split('\n')) {
       if (!line) continue
       let entry: unknown
       try { entry = JSON.parse(line) } catch { throw new Error('invalid revocation journal') }
@@ -215,6 +217,23 @@ export function writeState(path: string, value: State): void {
   if (failure !== undefined) throw failure
 }
 
+/** Find the byte immediately after the last complete journal record. */
+function completeJournalSize(fd: number, size: number): number {
+  const buffer = Buffer.allocUnsafe(Math.min(size, 4096))
+  let end = size
+  while (end > 0) {
+    const start = Math.max(0, end - buffer.length)
+    const length = end - start
+    if (readSync(fd, buffer, 0, length, start) !== length) {
+      throw new Error('could not read the revocation journal tail')
+    }
+    const newline = buffer.lastIndexOf(0x0a, length - 1)
+    if (newline !== -1) return start + newline + 1
+    end = start
+  }
+  return 0
+}
+
 /**
  * Append and sync one revocation record, or return false if compaction must
  * free space before this record can be appended.
@@ -226,14 +245,20 @@ export function writeState(path: string, value: State): void {
  */
 export function appendRevocation(path: string, entry: RevokedSession): boolean {
   const journal = revocationPath(path)
-  const record = JSON.stringify(entry) + '\n'
-  tightenState(journal)
-  const fd = openSync(journal, 'a', 0o600)
+  const record = Buffer.from(JSON.stringify(entry) + '\n')
+  const existed = tightenState(journal)
+  // Windows append-only handles cannot truncate. The profile lock lets us
+  // repair and append with explicit offsets on a read/write descriptor.
+  const fd = openSync(journal, existed ? 'r+' : 'wx+', 0o600)
   try {
-    const size = fstatSync(fd).size
-    if (size + Buffer.byteLength(record) > MAX_REVOCATION_JOURNAL_BYTES) return false
+    const fileSize = fstatSync(fd).size
+    const size = completeJournalSize(fd, fileSize)
+    if (size + record.length > MAX_REVOCATION_JOURNAL_BYTES) return false
+    if (size !== fileSize) ftruncateSync(fd, size)
     try {
-      writeFileSync(fd, record)
+      if (writeSync(fd, record, 0, record.length, size) !== record.length) {
+        throw new Error('incomplete revocation journal append')
+      }
       fsyncSync(fd)
     } catch (err) {
       // The profile lock ensures this is the only writer. Preserve earlier

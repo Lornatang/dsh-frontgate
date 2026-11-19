@@ -640,11 +640,9 @@ test('logout rolls back an incomplete journal append and can retry', async (t) =
   assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie: firstCookie } })).res.status, 302)
   const original = readFileSync(journalPath, 'utf8')
 
-  const write = fs.writeFileSync
-  const failedWrite = t.mock.method(fs, 'writeFileSync', (fd, data) => {
-    write(fd, data.slice(0, 10))
-    throw new Error('simulated partial append')
-  })
+  const write = fs.writeSync
+  const failedWrite = t.mock.method(fs, 'writeSync', (fd, data, offset, _length, position) =>
+    write(fd, data, offset, 10, position))
   syncBuiltinESMExports()
   try {
     const result = await request(gate.port, '/__gate/logout', { headers: { cookie: secondCookie } })
@@ -660,6 +658,35 @@ test('logout rolls back an incomplete journal append and can retry', async (t) =
   assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 401)
   assert.equal((await request(gate.port, '/api/sessions', { headers: { cookie: secondCookie } })).res.status, 401)
 })
+
+for (const completeJson of [false, true]) {
+  const tail = completeJson ? 'JSON without a newline' : 'a partial record'
+  test('restart and logout recover from ' + tail + ' at the end of the journal', async (t) => {
+    const { gate, upstream, dir } = await withGate(t)
+    const journalPath = join(dir, 'data', 'dsh-frontgate.json.revocations')
+    const firstCookie = (await login(gate.port)).cookie
+    const secondCookie = (await login(gate.port)).cookie
+    assert.equal((await request(gate.port, '/__gate/logout', { headers: { cookie: firstCookie } })).res.status, 302)
+    const original = readFileSync(journalPath, 'utf8')
+    const secondToken = secondCookie.slice(secondCookie.indexOf('=') + 1)
+    const record = JSON.stringify({
+      digest: createHash('sha256').update(secondToken).digest('base64url'),
+      expires: Number(secondToken.split('.')[2]),
+    })
+    writeFileSync(journalPath, original + (completeJson ? record : record.slice(0, 10)))
+
+    gate.dispose()
+    const restarted = await startGate(upstream.port, dir)
+    try {
+      assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie: firstCookie } })).res.status, 401)
+      assert.equal((await request(restarted.port, '/api/sessions', { headers: { cookie: secondCookie } })).res.status, 200)
+      assert.equal((await request(restarted.port, '/__gate/logout', { headers: { cookie: secondCookie } })).res.status, 302)
+      assert.equal(readFileSync(journalPath, 'utf8'), original + record + '\n')
+    } finally {
+      restarted.dispose()
+    }
+  })
+}
 
 test('a second gate cannot use the same profile or disturb the first gate', async (t) => {
   const { gate, upstream, dir } = await withGate(t)
@@ -1684,6 +1711,18 @@ test('malformed state is preserved instead of silently resetting credentials', a
     writeFileSync(path, data, { mode: 0o600 })
     assert.throws(() => apply(ctx, { listenPort: 0, passwordHash: HASH }), /invalid state file/)
     assert.equal(readFileSync(path, 'utf8'), data)
+  }
+})
+
+test('restart rejects malformed newline-terminated journal records', async (t) => {
+  const { gate, upstream, dir } = await withGate(t)
+  const journalPath = join(dir, 'data', 'dsh-frontgate.json.revocations')
+  gate.dispose()
+  for (const line of ['{"digest":', '{"digest":"invalid","expires":1}']) {
+    const journal = line + '\n'
+    writeFileSync(journalPath, journal, { mode: 0o600 })
+    await assert.rejects(startGate(upstream.port, dir), /invalid state file/)
+    assert.equal(readFileSync(journalPath, 'utf8'), journal)
   }
 })
 
